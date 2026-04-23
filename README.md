@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <em>Your <span style="color:#00FFC8;font-weight:bold">activity</span>, into <span style="color:#FF009E;font-weight:bold">automation</span>.</em>
+</p>
+
+<p align="center">
   <a href="https://discord.gg/8j7dFWMMDA">
     <img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord">
   </a>
