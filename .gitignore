@@ -34,3 +34,10 @@ output/
 Thumbs.db
 .DS_Store
 nul
+
+.jailed_bin/
+
+
+test_cancel*.py
+test_interrupt*.py
+test_remote*.py

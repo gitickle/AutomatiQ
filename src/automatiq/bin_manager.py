@@ -10,6 +10,7 @@ import os
 import platform
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import urllib.request
@@ -194,6 +195,41 @@ def _extract_binary_from_archive(archive_path: Path, binary_name: str, dest: Pat
     return False
 
 
+def _resolve_shim(path: Path) -> Path | None:
+    if sys.platform != "win32":
+        return None
+    shim_file = path.with_suffix(".shim")
+    if shim_file.exists():
+        for line in shim_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("path="):
+                real = Path(line.split("=", 1)[1].strip().strip('"'))
+                if real.exists():
+                    return real
+    return None
+
+
+def _copy_system_binary(found: str, dest: Path) -> bool:
+    src = Path(found)
+    resolved = _resolve_shim(src)
+    if resolved:
+        src = resolved
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copy2(src, dest)
+    try:
+        subprocess.run(
+            [str(dest), "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return True
+    except (subprocess.SubprocessError, OSError):
+        dest.unlink(missing_ok=True)
+        return False
+
+
 # ── Per-tool ensure functions ────────────────────────────────────────────────
 
 
@@ -203,7 +239,8 @@ def _ensure_busybox(bin_dir: Path, os_name: str, arch: str):
     dest = bin_dir / "busybox.exe"
     if dest.exists():
         return
-    if shutil.which("busybox"):
+    found = shutil.which("busybox")
+    if found and _copy_system_binary(found, dest):
         return
     url, _ = _pick_busybox_url(arch)
     _download_file(url, dest, label="busybox")
@@ -213,7 +250,8 @@ def _ensure_rg(bin_dir: Path, os_name: str, arch: str):
     dest = bin_dir / _exe("rg")
     if dest.exists():
         return
-    if shutil.which("rg"):
+    found = shutil.which("rg")
+    if found and _copy_system_binary(found, dest):
         return
     url = RG_URLS.get((os_name, arch))
     if not url:
@@ -229,7 +267,8 @@ def _ensure_jq(bin_dir: Path, os_name: str, arch: str):
     dest = bin_dir / _exe("jq")
     if dest.exists():
         return
-    if shutil.which("jq"):
+    found = shutil.which("jq")
+    if found and _copy_system_binary(found, dest):
         return
     url = JQ_URLS.get((os_name, arch))
     if not url:
@@ -243,7 +282,8 @@ def _ensure_sd(bin_dir: Path, os_name: str, arch: str):
     dest = bin_dir / _exe("sd")
     if dest.exists():
         return
-    if shutil.which("sd"):
+    found = shutil.which("sd")
+    if found and _copy_system_binary(found, dest):
         return
     url = SD_URLS.get((os_name, arch))
     if not url:

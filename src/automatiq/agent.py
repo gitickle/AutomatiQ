@@ -108,8 +108,9 @@ You have enough verified pieces to assemble the final script. You're composing, 
 mode_injections = {
     ModeEnum.reading: (
         "You are now in **reading mode**. "
-        "Explore the session dump. Read files, grep, follow threads. "
         "Build your understanding of what happened in the recorded session. "
+        "Explore the session dump. Read files, grep, follow values(tokens, keys, cookies) that "
+        "help to recreate the goal request. "
         "When you have specific beliefs worth testing against the live site, "
         "switch to testing mode and write down what you've learned."
         "In reading mode, your aim is not only to extract info from the session_dump,"
@@ -117,25 +118,24 @@ mode_injections = {
         "quantitative and qualitative questions as well. so clarify what user wants by asking"
     ),
     ModeEnum.testing: (
-        "You are now in **testing mode**. "
-        "You have beliefs to verify. Test them against the live site, "
-        "one at a time. One cell, one question. "
-        "If something doesn't match your expectations, that's useful — "
-        "investigate it or switch back to reading mode to dig deeper. "
-        "When you have enough verified pieces, switch to building mode. "
-        "Try your out-of-the-box crazy thinking to fix issues. "
-        "When you cant figure out what is going wrong, go back to reading mode.\n\n"
+        "You are now in testing mode. "
+        "Verify your assumptions against the live site, one at a time, one cell, one question. "
+        "If something does not match your expectations, investigate it or return to reading mode to dig deeper. "
+        "Crazy out-of-box thinking when debugging, try to follow your hunch and"
+        " exhaust your own hypotheses before attempting to give up. "
+        "Always try not to hardcode temporary values(cookies, tokens) in your script. Instead go back to reading mode,"
+        " to figure out how they are created or extracted"
+        "If you cannot figure out what is going wrong, return to reading mode. "
+        "Once you have enough verified pieces, switch to building mode."
     ),
     ModeEnum.building: (
-        "You are now in **building mode**. "
-        "Assemble your verified pieces into the final script. "
-        "Run it end-to-end. Check that the output looks right — "
-        "not just that the code runs, but that the data makes sense. "
-        "If something breaks, identify which piece failed and switch "
-        "back to testing mode for that specific piece."
-        "Not only testing mode is responsible for testing,"
-        "you are also asked to test script you have built."
-        "If you script fails, just report back to testing mode"
+        "You are now in building mode. "
+        "Assemble your verified pieces into the final script and run it end-to-end. "
+        "Validate that it runs correctly and that the output makes sense. "
+        "Do not accept hardcoded values, headers, or tokens. "
+        "Everything must be dynamically bootstrapped before the target request is made. "
+        "If any hardcoded information is found, return to reading mode to figure out how to derive those values "
+        "If anything fails, identify the broken piece and return to testing mode for that piece only."
     ),
 }
 
