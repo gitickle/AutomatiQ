@@ -72,17 +72,24 @@ def _preload():
 
         if _is_verbose:
             config.VERBOSE = True
-            import logging
 
-            handler = logging.StreamHandler()
-            handler.setFormatter(
-                logging.Formatter(
-                    "%(asctime)s  %(levelname)-5s  %(name)s  %(message)s",
-                    datefmt="%H:%M:%S",
-                )
-            )
-            logging.getLogger("automatiq").addHandler(handler)
-            logging.getLogger("automatiq").setLevel(logging.DEBUG)
+        import logging
+
+        from rich.logging import RichHandler
+
+        from .console import console
+
+        level = logging.DEBUG if config.VERBOSE else logging.INFO
+
+        rich_handler = RichHandler(
+            console=console, show_time=True, show_path=config.VERBOSE, markup=False, rich_tracebacks=True
+        )
+        rich_handler.setLevel(level)
+
+        automatiq_logger = logging.getLogger("automatiq")
+        automatiq_logger.setLevel(logging.DEBUG)
+        automatiq_logger.handlers.clear()
+        automatiq_logger.addHandler(rich_handler)
 
         if cmd in ("agent", "run", ""):
             import instructor  # noqa: F401
