@@ -37,6 +37,7 @@ from .console import (
     warn,
 )
 from .console import prompt as rich_prompt
+from .events import AgentEvent, EventType
 from .ipython_sandbox import AgentSandbox
 from .prompt import PromptFactory
 from .schema import (
@@ -81,10 +82,34 @@ def run_cancellable(token: CancelToken, fn, *args, **kwargs):
     return result_box[0]
 
 
-def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None):
+def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None, cancel_token: CancelToken = None):
     """Interactive agent loop. Reads from the workspace produced by the recorder."""
     if cancel_token is None:
         cancel_token = CancelToken()
+
+    def _handle_cli_event(event: AgentEvent):
+        """Fallback renderer when running in plain terminal mode."""
+        if event.type == EventType.STEP_START:
+            step_info(event.payload["step"], event.payload["prompt_tokens"])
+        elif event.type == EventType.THOUGHT:
+            think(event.payload["text"])
+        elif event.type == EventType.TOOL_MESSAGE:
+            print(event.payload["text"])
+        elif event.type == EventType.MODE_SWITCH:
+            info(f"Switching to {event.payload['mode']} mode")
+        elif event.type == EventType.CODE_EXEC:
+            code_block(event.payload["script"])
+        elif event.type == EventType.CODE_OUTPUT:
+            output_panel(event.payload["output"])
+
+    def emit(event_type: EventType, **payload):
+        """Route data to the UI queue or the CLI fallback."""
+        event = AgentEvent(type=event_type, payload=payload)
+        if output_queue is not None:
+            output_queue.put(event)
+        else:
+            _handle_cli_event(event)
+
     if not config.LOGS_DIR.exists():
         config.ensure_output_dirs()
         init_file_logger(str(config.LOGS_DIR))
@@ -287,7 +312,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                 awaiting_tool_complete = False
                 awaiting_mode_switch = False
                 continue
-            step_info(step, raw_response.usage.prompt_tokens)
+            emit(EventType.STEP_START, step=step, prompt_tokens=raw_response.usage.prompt_tokens)
             current_thought = resp.thought_process
             if current_thought == prev_thought and current_thought:
                 warn("Exact duplicate thought_process detected.")
@@ -311,7 +336,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                 continue
             prev_thought = current_thought
             agent.add_step(AgentStep(role="assistant", content=resp))
-            think(resp.thought_process)
+            emit(EventType.THOUGHT, text=resp.thought_process)
             if resp.tool == ToolEnum.message_to_user:
                 if resp.tool_content.does_it_contain_the_final_script and agent.current_mode != ModeEnum.building:
                     warn("Final script submitted outside building mode — bouncing back.")
@@ -354,7 +379,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                         )
                         continue
                     final_script_bounces = 0
-                print(f"\n{resp.tool_content.message_to_user}\n")
+                emit(EventType.TOOL_MESSAGE, text=f"\n{resp.tool_content.message_to_user}\n")
                 needs_user_input = True
             elif resp.tool == ToolEnum.execute_ipython:
                 script_to_run = resp.tool_content.ipython_script
@@ -385,7 +410,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                         )
                     )
                     continue
-                code_block(script_to_run)
+                emit(EventType.CODE_EXEC, script=script_to_run)
                 try:
                     with spinner("Running..."):
                         scr = run_cancellable(cancel_token, sandbox.execute, script_to_run)
@@ -405,7 +430,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                         f"Use %view_output Cell_{output_match_cell} if you need to review it."
                     )
                 exec_history.append((script_to_run.strip(), scr, current_cell))
-                output_panel(scr)
+                emit(EventType.CODE_OUTPUT, output=scr)
                 awaiting_tool_complete = True
                 if consecutive_execs >= MAX_CONSECUTIVE_EXECS:
                     agent.add_step(
@@ -441,7 +466,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                 target_mode = resp.tool_content.target_mode
                 context_memo = resp.tool_content.context
                 consecutive_execs = 0
-                logger.info(f"Switching to {target_mode.value} mode")
+                emit(EventType.MODE_SWITCH, mode=target_mode.value)
                 agent.switch_mode(target_mode)
                 mode_injection = agent.mode_injections.get(target_mode, "")
                 mode_switch_notification = (
