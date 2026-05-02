@@ -1,4 +1,4 @@
-from .cli.console import warn
+from .console import warn
 
 
 def get_cli_skip_callback():
