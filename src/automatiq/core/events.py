@@ -1,30 +1,40 @@
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
+from blinker import Namespace
 
+agent_signals = Namespace()
 
-class EventType(Enum):
-    STEP_START = "step_start"  # payload: {"step": int, "prompt_tokens": int}
-    THOUGHT = "thought"  # payload: {"text": str}
-    TOOL_MESSAGE = "tool_message"  # payload: {"text": str}
-    MODE_SWITCH = "mode_switch"  # payload: {"mode": str}
-    CODE_EXEC = "code_exec"  # payload: {"script": str}
-    CODE_OUTPUT = "code_output"  # payload: {"output": str}
-    AGENT_DONE = "agent_done"  # payload: {}
+# Lifecycle Events
+agent_start = agent_signals.signal("agent_start")
+step_start = agent_signals.signal("step_start")
+step_end = agent_signals.signal("step_end")
+agent_done = agent_signals.signal("agent_done")
 
-    # New events for UI decoupling
-    LLM_REQUEST_START = "llm_request_start"  # payload: {}
-    LLM_REQUEST_END = "llm_request_end"  # payload: {}
-    CODE_EXEC_START = "code_exec_start"  # payload: {}
-    CODE_EXEC_END = "code_exec_end"  # payload: {}
-    WAIT_START = "wait_start"  # payload: {"seconds": int, "reason": str}
-    PROMPT_REQUEST = "prompt_request"  # payload: {}
-    LOG_INFO = "log_info"  # payload: {"text": str}
-    LOG_WARN = "log_warn"  # payload: {"text": str}
-    LOG_ERROR = "log_error"  # payload: {"text": str}
+# User Interaction Events
+prompt_request_start = agent_signals.signal("prompt_request_start")
+prompt_request_end = agent_signals.signal("prompt_request_end")
 
+# LLM Network Events
+llm_request_start = agent_signals.signal("llm_request_start")
+llm_request_end = agent_signals.signal("llm_request_end")
+llm_request_error = agent_signals.signal("llm_request_error")
 
-@dataclass
-class AgentEvent:
-    type: EventType
-    payload: dict[str, Any] = field(default_factory=dict)
+# Tool Execution Events
+tool_exec_start = agent_signals.signal("tool_exec_start")
+code_exec_start = agent_signals.signal("code_exec_start")
+code_exec_output = agent_signals.signal("code_exec_output")
+code_exec_end = agent_signals.signal("code_exec_end")
+code_exec_error = agent_signals.signal("code_exec_error")
+
+# Thought & Observation Events
+agent_thought = agent_signals.signal("agent_thought")
+tool_message = agent_signals.signal("tool_message")
+mode_switch = agent_signals.signal("mode_switch")
+
+# Wait / Retry Events
+wait_start = agent_signals.signal("wait_start")
+wait_end = agent_signals.signal("wait_end")
+operation_cancelled = agent_signals.signal("operation_cancelled")
+
+# Logging Events
+log_info = agent_signals.signal("log_info")
+log_warn = agent_signals.signal("log_warn")
+log_error = agent_signals.signal("log_error")

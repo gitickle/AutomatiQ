@@ -43,6 +43,7 @@ dependencies = [
     "beautifulsoup4~=4.14.3",
     "magika~=1.0.1",
     "ipython~=9.10.0",
+    "blinker>=1.9.0",
 ]
 
 [project.urls]
@@ -62,7 +63,7 @@ dev = [
 automatiq = "automatiq.__main__:main"
 
 [tool.setuptools.dynamic]
-version = {attr = "automatiq.config.VERSION"}
+version = {attr = "automatiq.core.config.VERSION"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

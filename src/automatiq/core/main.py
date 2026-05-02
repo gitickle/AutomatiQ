@@ -20,9 +20,8 @@ from litellm.exceptions import (
     Timeout,
 )
 
-from . import config
+from . import config, events
 from .cancel_standard import CancelRequestedException, CancelToken
-from .events import AgentEvent, EventType
 from .ipython_sandbox import AgentSandbox
 from .prompt import PromptFactory
 from .schema import (
@@ -67,21 +66,19 @@ def run_cancellable(token: CancelToken, fn, *args, **kwargs):
     return result_box[0]
 
 
-def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None, cancel_token: CancelToken = None):
+def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None):
+    events.agent_start.send("core")
     """Interactive agent loop. Reads from the workspace produced by the recorder."""
     if cancel_token is None:
         cancel_token = CancelToken()
 
-    def emit(event_type: EventType, **payload):
-        event = AgentEvent(type=event_type, payload=payload)
-        if output_queue is not None:
-            output_queue.put(event)
-
     workspace_dir = config.WORKSPACE_DIR
     session_dump = workspace_dir / "session_dump"
     if not session_dump.exists() or not any(session_dump.iterdir()):
-        emit(EventType.LOG_ERROR, text=f"No recorded session found at {session_dump}")
-        emit(EventType.LOG_INFO, text="Run 'automatiq record <url>' first, or use 'automatiq run <url>' for one-shot.")
+        events.log_error.send("core", text=f"No recorded session found at {session_dump}")
+        events.log_info.send(
+            "core", text="Run 'automatiq record <url>' first, or use 'automatiq run <url>' for one-shot."
+        )
         sys.exit(1)
     workspace = str(workspace_dir)
     os.makedirs(workspace, exist_ok=True)
@@ -198,16 +195,17 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                 needs_user_input = True
                 continue
             if needs_user_input:
-                emit(EventType.PROMPT_REQUEST)
+                events.prompt_request_start.send("core")
                 if input_queue is not None:
                     ip = input_queue.get()
+                    events.prompt_request_end.send("core")
                 else:
                     try:
                         ip = input(">>> ")
                     except EOFError:
                         ip = "q"
                 if ip.strip().lower() == "q":
-                    emit(EventType.LOG_INFO, text="User requested exit.")
+                    events.log_info.send("core", text="User requested exit.")
                     break
                 agent.add_step(
                     AgentStep(
@@ -238,14 +236,15 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
             aborted = False
             for attempt in range(1, MAX_LLM_RETRIES + 1):
                 try:
-                    emit(EventType.LLM_REQUEST_START)
+                    events.llm_request_start.send("core")
                     try:
                         resp, raw_response = run_cancellable(cancel_token, _call_llm, compiled_messages)
                     finally:
-                        emit(EventType.LLM_REQUEST_END)
+                        events.llm_request_end.send("core")
                     break
                 except CancelRequestedException:
-                    logger.info("Cancelled by token. Returning to prompt.")
+                    events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
+                    events.operation_cancelled.send("core")
                     aborted = True
                     break
                 except (
@@ -258,11 +257,11 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                 ) as exc:
                     msg = _extract_message(exc)
                     wait = BASE_BACKOFF * (2 ** (attempt - 1))
-                    emit(EventType.LOG_WARN, text=f"LLM call failed (attempt {attempt}/{MAX_LLM_RETRIES}): {msg}")
+                    events.log_warn.send("core", text=f"LLM call failed (attempt {attempt}/{MAX_LLM_RETRIES}): {msg}")
                     logger.exception("Exception occurred")
                     if attempt < MAX_LLM_RETRIES:
-                        emit(EventType.LOG_WARN, text=f"Retrying in {wait}s ...")
-                        emit(EventType.WAIT_START, seconds=wait, reason="Retrying")
+                        events.log_warn.send("core", text=f"Retrying in {wait}s ...")
+                        events.wait_start.send("core", seconds=wait, reason="Retrying")
                         import time
 
                         cancelled = False
@@ -273,11 +272,12 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                             time.sleep(1)
                         if cancelled:
                             cancel_token.reset()
-                            logger.info("Cancelled by token. Returning to prompt.")
+                            events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
+                            events.operation_cancelled.send("core")
                             aborted = True
                             break
                     else:
-                        emit(EventType.LOG_ERROR, text="Max retries exceeded. Returning to prompt.")
+                        events.log_error.send("core", text="Max retries exceeded. Returning to prompt.")
                         aborted = True
                         break
             if aborted or resp is None:
@@ -285,10 +285,10 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                 awaiting_tool_complete = False
                 awaiting_mode_switch = False
                 continue
-            emit(EventType.STEP_START, step=step, prompt_tokens=raw_response.usage.prompt_tokens)
+            events.step_start.send("core", step=step, prompt_tokens=raw_response.usage.prompt_tokens)
             current_thought = resp.thought_process
             if current_thought == prev_thought and current_thought:
-                emit(EventType.LOG_WARN, text="Exact duplicate thought_process detected.")
+                events.log_warn.send("core", text="Exact duplicate thought_process detected.")
                 agent.add_step(AgentStep(role="assistant", content=resp))
                 agent.add_step(
                     AgentStep(
@@ -309,10 +309,10 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                 continue
             prev_thought = current_thought
             agent.add_step(AgentStep(role="assistant", content=resp))
-            emit(EventType.THOUGHT, text=resp.thought_process)
+            events.agent_thought.send("core", text=resp.thought_process)
             if resp.tool == ToolEnum.message_to_user:
                 if resp.tool_content.does_it_contain_the_final_script and agent.current_mode != ModeEnum.building:
-                    emit(EventType.LOG_WARN, text="Final script submitted outside building mode — bouncing back.")
+                    events.log_warn.send("core", text="Final script submitted outside building mode — bouncing back.")
                     agent.add_step(
                         AgentStep(
                             role="user",
@@ -352,7 +352,7 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                         )
                         continue
                     final_script_bounces = 0
-                emit(EventType.TOOL_MESSAGE, text=f"\n{resp.tool_content.message_to_user}\n")
+                events.tool_message.send("core", text=f"\n{resp.tool_content.message_to_user}\n")
                 needs_user_input = True
             elif resp.tool == ToolEnum.execute_ipython:
                 script_to_run = resp.tool_content.ipython_script
@@ -366,9 +366,8 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                         repeat_count += 1
                         matched_cell = prev_cell
                 if repeat_count >= 2 and matched_cell is not None:
-                    emit(
-                        EventType.LOG_WARN,
-                        text=f"Blocked: same script already ran {repeat_count} times (last: Cell_{matched_cell}).",
+                    events.log_warn.send(
+                        "core", text=f"Blocked: script ran {repeat_count}x (last: Cell_{matched_cell})."
                     )
                     agent.add_step(
                         AgentStep(
@@ -386,16 +385,17 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                         )
                     )
                     continue
-                emit(EventType.CODE_EXEC, script=script_to_run)
+                events.code_exec_start.send("core", script=script_to_run)
                 try:
-                    emit(EventType.CODE_EXEC_START)
+                    events.code_exec_start.send("core")
                     try:
                         scr = run_cancellable(cancel_token, sandbox.execute, script_to_run)
                     finally:
-                        emit(EventType.CODE_EXEC_END)
+                        events.code_exec_end.send("core")
                 except CancelRequestedException:
                     sandbox.cancel()
-                    logger.info("Cancelled by token. Returning to prompt.")
+                    events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
+                    events.operation_cancelled.send("core")
                     needs_user_input = True
                     continue
                 output_match_cell = None
@@ -409,7 +409,7 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                         f"Use %view_output Cell_{output_match_cell} if you need to review it."
                     )
                 exec_history.append((script_to_run.strip(), scr, current_cell))
-                emit(EventType.CODE_OUTPUT, output=scr)
+                events.code_exec_output.send("core", output=scr)
                 awaiting_tool_complete = True
                 if consecutive_execs >= MAX_CONSECUTIVE_EXECS:
                     agent.add_step(
@@ -445,7 +445,7 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                 target_mode = resp.tool_content.target_mode
                 context_memo = resp.tool_content.context
                 consecutive_execs = 0
-                emit(EventType.MODE_SWITCH, mode=target_mode.value)
+                events.mode_switch.send("core", mode=target_mode.value)
                 agent.switch_mode(target_mode)
                 mode_injection = agent.mode_injections.get(target_mode, "")
                 mode_switch_notification = (
@@ -453,14 +453,14 @@ def run_agent(input_queue: queue.Queue = None, output_queue: queue.Queue = None,
                 )
                 awaiting_mode_switch = True
     except Exception as exc:
-        emit(EventType.LOG_ERROR, text=f"Unexpected error: {exc}")
+        events.log_error.send("core", text=f"Unexpected error: {exc}")
         logger.exception("Exception occurred")
         sandbox.cancel()
     finally:
         try:
             _export_session_logs(global_memory, agent)
         except Exception as exc:
-            emit(EventType.LOG_ERROR, text=f"Failed to save session logs: {exc}")
+            events.log_error.send("core", text=f"Failed to save session logs: {exc}")
             logger.exception("Exception occurred")
         sandbox.close()
 

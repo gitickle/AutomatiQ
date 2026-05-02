@@ -2,8 +2,8 @@ import logging
 import queue
 import threading
 
+from ..core import events
 from ..core.cancel_standard import CancelToken
-from ..core.events import EventType
 from ..core.main import run_agent
 from .console import (
     code_block,
@@ -20,111 +20,141 @@ from .console import (
 
 logger = logging.getLogger(__name__)
 
+# Global state for UI elements that span events
+_active_spinner = None
+_first_prompt = True
+
+
+@events.step_start.connect
+def handle_step_start(sender, step, prompt_tokens, **kwargs):
+    step_info(step, prompt_tokens)
+
+
+@events.agent_thought.connect
+def handle_agent_thought(sender, text, **kwargs):
+    think(text)
+
+
+@events.tool_message.connect
+def handle_tool_message(sender, text, **kwargs):
+    print(text)
+
+
+@events.mode_switch.connect
+def handle_mode_switch(sender, mode, **kwargs):
+    info(f"Switching to {mode} mode")
+
+
+@events.code_exec_start.connect
+def handle_code_exec_start(sender, script=None, **kwargs):
+    global _active_spinner
+    if script is not None:
+        code_block(script)
+    if _active_spinner is None:
+        _active_spinner = spinner("Running...")
+        _active_spinner.__enter__()
+
+
+@events.code_exec_output.connect
+def handle_code_exec_output(sender, output, **kwargs):
+    output_panel(output)
+
+
+@events.code_exec_end.connect
+def handle_code_exec_end(sender, **kwargs):
+    global _active_spinner
+    if _active_spinner:
+        _active_spinner.__exit__(None, None, None)
+        _active_spinner = None
+
+
+@events.llm_request_start.connect
+def handle_llm_request_start(sender, **kwargs):
+    global _active_spinner
+    if _active_spinner is None:
+        _active_spinner = spinner("Thinking...")
+        _active_spinner.__enter__()
+
+
+@events.llm_request_end.connect
+def handle_llm_request_end(sender, **kwargs):
+    global _active_spinner
+    if _active_spinner:
+        _active_spinner.__exit__(None, None, None)
+        _active_spinner = None
+
+
+@events.log_info.connect
+def handle_log_info(sender, text, **kwargs):
+    info(text)
+
+
+@events.log_warn.connect
+def handle_log_warn(sender, text, **kwargs):
+    warn(text)
+
+
+@events.log_error.connect
+def handle_log_error(sender, text, **kwargs):
+    error(text)
+
 
 def run_agent_cli(cancel_token: CancelToken = None):
     if cancel_token is None:
         cancel_token = CancelToken()
 
     input_queue = queue.Queue()
-    output_queue = queue.Queue()
+
+    @events.wait_start.connect
+    def handle_wait_start(sender, seconds, reason, **kwargs):
+        cancelled = countdown(seconds, message=reason, cancel_check=cancel_token.is_cancelled)
+        if cancelled:
+            cancel_token.reset()
+            events.operation_cancelled.send("core")
+
+    @events.prompt_request_start.connect
+    def handle_prompt_request_start(sender, **kwargs):
+        global _first_prompt
+        if _first_prompt:
+            info("Type in q to quit | Esc to cancel processing")
+            _first_prompt = False
+
+        try:
+            ip = prompt()
+        except (KeyboardInterrupt, EOFError):
+            ip = "q"
+        input_queue.put(ip)
 
     def backend_worker():
         try:
-            run_agent(input_queue=input_queue, output_queue=output_queue, cancel_token=cancel_token)
+            run_agent(input_queue=input_queue, cancel_token=cancel_token)
         except Exception:
             logger.exception("Agent loop crashed")
         finally:
-            output_queue.put({"type": EventType.AGENT_DONE})
+            events.agent_done.send("core")
 
     t = threading.Thread(target=backend_worker, daemon=True)
     t.start()
 
-    _first_prompt = True
-    active_spinner = None
-
     try:
-        while True:
-            event = output_queue.get()
+        # Since Blinker handlers are executed in the sender's thread (which is `backend_worker`),
+        # they might run into threading issues if Rich wasn't thread-safe (it mostly is).
+        # We need the main thread to stay alive until agent_done.
+        done_event = threading.Event()
 
-            # Since event is an AgentEvent object
-            if isinstance(event, dict):
-                ev_type = event.get("type")
-                payload = event.get("payload", {})
-            else:
-                ev_type = event.type
-                payload = event.payload
+        @events.agent_done.connect
+        def handle_agent_done(sender, **kwargs):
+            done_event.set()
 
-            if ev_type == EventType.AGENT_DONE:
-                break
-
-            elif ev_type == EventType.STEP_START:
-                step_info(payload["step"], payload["prompt_tokens"])
-
-            elif ev_type == EventType.THOUGHT:
-                think(payload["text"])
-
-            elif ev_type == EventType.TOOL_MESSAGE:
-                print(payload["text"])
-
-            elif ev_type == EventType.MODE_SWITCH:
-                info(f"Switching to {payload['mode']} mode")
-
-            elif ev_type == EventType.CODE_EXEC:
-                code_block(payload["script"])
-
-            elif ev_type == EventType.CODE_OUTPUT:
-                output_panel(payload["output"])
-
-            elif ev_type == EventType.LLM_REQUEST_START:
-                active_spinner = spinner("Thinking...")
-                active_spinner.__enter__()
-
-            elif ev_type == EventType.LLM_REQUEST_END:
-                if active_spinner:
-                    active_spinner.__exit__(None, None, None)
-                    active_spinner = None
-
-            elif ev_type == EventType.CODE_EXEC_START:
-                active_spinner = spinner("Running...")
-                active_spinner.__enter__()
-
-            elif ev_type == EventType.CODE_EXEC_END:
-                if active_spinner:
-                    active_spinner.__exit__(None, None, None)
-                    active_spinner = None
-
-            elif ev_type == EventType.WAIT_START:
-                cancelled = countdown(
-                    payload["seconds"], message=payload.get("reason", "Retrying"), cancel_check=cancel_token.is_cancelled
-                )
-                if cancelled:
-                    cancel_token.reset()
-
-            elif ev_type == EventType.PROMPT_REQUEST:
-                if _first_prompt:
-                    info("Type in q to quit | Esc to cancel processing")
-                    _first_prompt = False
-
-                try:
-                    ip = prompt()
-                except (KeyboardInterrupt, EOFError):
-                    ip = "q"
-                input_queue.put(ip)
-                if ip.strip().lower() == "q":
-                    break
-
-            elif ev_type == EventType.LOG_INFO:
-                info(payload["text"])
-
-            elif ev_type == EventType.LOG_WARN:
-                warn(payload["text"])
-
-            elif ev_type == EventType.LOG_ERROR:
-                error(payload["text"])
+        # Wait for the backend thread to finish, keeping main thread alive for interrupts
+        while not done_event.wait(timeout=0.1):
+            pass
 
     except KeyboardInterrupt:
         info("Interrupted by user (Ctrl+C). Exiting...")
         cancel_token.cancel()
     finally:
-        if active_spinner:
-            active_spinner.__exit__(None, None, None)
+        global _active_spinner
+        if _active_spinner:
+            _active_spinner.__exit__(None, None, None)
+            _active_spinner = None
