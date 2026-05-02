@@ -51,15 +51,15 @@ Homepage = "https://github.com/StoneSteel27/AutomatiQ"
 Repository = "https://github.com/StoneSteel27/AutomatiQ"
 Issues = "https://github.com/StoneSteel27/AutomatiQ/issues"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pre-commit>=3.6.0",
     "ruff>=0.3.0",
-    "build>=0.10.0",
+    "build>=1.5.0",
     "twine>=5.0.0",
     "pytest>=8.0.0",
     "pytest-mock>=3.14.0",
-    "pytest-benchmark>=4.0.0",
+    "pytest-benchmark>=5.2.3",
 ]
 
 [project.scripts]
@@ -86,9 +86,3 @@ ignore = ["UP042"]
 
 [tool.ruff.format]
 quote-style = "double"
-
-[dependency-groups]
-dev = [
-    "build>=1.5.0",
-    "pytest-benchmark>=5.2.3",
-]

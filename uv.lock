@@ -211,7 +211,7 @@ dependencies = [
     { name = "zendriver" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "build" },
     { name = "pre-commit" },
@@ -222,17 +222,10 @@ dev = [
     { name = "twine" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "build" },
-    { name = "pytest-benchmark" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = "~=4.14.3" },
     { name = "blinker", specifier = ">=1.9.0" },
-    { name = "build", marker = "extra == 'dev'", specifier = ">=0.10.0" },
     { name = "curl-cffi", specifier = "~=0.14.0" },
     { name = "imageio-ffmpeg", specifier = "~=0.6.0" },
     { name = "instructor", specifier = "~=1.14.5" },
@@ -241,25 +234,24 @@ requires-dist = [
     { name = "magika", specifier = "~=1.0.1" },
     { name = "mss", specifier = "~=10.1.0" },
     { name = "numpy", specifier = "~=2.4.0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "pydantic", specifier = "~=2.12.5" },
     { name = "pydantic-pick", specifier = "~=0.2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
     { name = "python-dotenv", specifier = "~=1.2.1" },
     { name = "pyyaml", specifier = "~=6.0.3" },
     { name = "requests", specifier = "~=2.32.5" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.3.0" },
-    { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "zendriver", specifier = "~=0.15.2" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "build", specifier = ">=1.5.0" },
+    { name = "pre-commit", specifier = ">=3.6.0" },
+    { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-benchmark", specifier = ">=5.2.3" },
+    { name = "pytest-mock", specifier = ">=3.14.0" },
+    { name = "ruff", specifier = ">=0.3.0" },
+    { name = "twine", specifier = ">=5.0.0" },
 ]
 
 [[package]]
