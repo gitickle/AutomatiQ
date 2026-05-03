@@ -1,0 +1,40 @@
+from blinker import Namespace
+
+agent_signals = Namespace()
+
+# Lifecycle Events
+agent_start = agent_signals.signal("agent_start")
+step_start = agent_signals.signal("step_start")
+step_end = agent_signals.signal("step_end")
+agent_done = agent_signals.signal("agent_done")
+
+# User Interaction Events
+prompt_request_start = agent_signals.signal("prompt_request_start")
+prompt_request_end = agent_signals.signal("prompt_request_end")
+
+# LLM Network Events
+llm_request_start = agent_signals.signal("llm_request_start")
+llm_request_end = agent_signals.signal("llm_request_end")
+llm_request_error = agent_signals.signal("llm_request_error")
+
+# Tool Execution Events
+tool_exec_start = agent_signals.signal("tool_exec_start")
+code_exec_start = agent_signals.signal("code_exec_start")
+code_exec_output = agent_signals.signal("code_exec_output")
+code_exec_end = agent_signals.signal("code_exec_end")
+code_exec_error = agent_signals.signal("code_exec_error")
+
+# Thought & Observation Events
+agent_thought = agent_signals.signal("agent_thought")
+tool_message = agent_signals.signal("tool_message")
+mode_switch = agent_signals.signal("mode_switch")
+
+# Wait / Retry Events
+wait_start = agent_signals.signal("wait_start")
+wait_end = agent_signals.signal("wait_end")
+operation_cancelled = agent_signals.signal("operation_cancelled")
+
+# Logging Events
+log_info = agent_signals.signal("log_info")
+log_warn = agent_signals.signal("log_warn")
+log_error = agent_signals.signal("log_error")

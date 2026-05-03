@@ -43,6 +43,7 @@ dependencies = [
     "beautifulsoup4~=4.14.3",
     "magika~=1.0.1",
     "ipython~=9.10.0",
+    "blinker>=1.9.0",
 ]
 
 [project.urls]
@@ -50,26 +51,29 @@ Homepage = "https://github.com/StoneSteel27/AutomatiQ"
 Repository = "https://github.com/StoneSteel27/AutomatiQ"
 Issues = "https://github.com/StoneSteel27/AutomatiQ/issues"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pre-commit>=3.6.0",
     "ruff>=0.3.0",
-    "build>=0.10.0",
+    "build>=1.5.0",
     "twine>=5.0.0",
+    "pytest>=8.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-benchmark>=5.2.3",
 ]
 
 [project.scripts]
 automatiq = "automatiq.__main__:main"
 
 [tool.setuptools.dynamic]
-version = {attr = "automatiq.config.VERSION"}
+version = {attr = "automatiq.core.config.VERSION"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["automatiq*"]
 
 [tool.setuptools.package-data]
-"automatiq" = ["data/*.json", "recorder/js/*.js"]
+"automatiq" = ["cli/data/*.json", "core/recorder/js/*.js"]
 
 [tool.ruff]
 line-length = 121

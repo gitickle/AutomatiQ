@@ -6,6 +6,7 @@ Checks ~/.automatiq/bin first, then system PATH, then downloads with a Rich
 progress display.
 """
 
+import logging
 import os
 import platform
 import shutil
@@ -15,20 +16,12 @@ import sys
 import tarfile
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
-from rich.progress import (
-    BarColumn,
-    DownloadColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeRemainingColumn,
-    TransferSpeedColumn,
-)
-
 from . import config
-from .console import error, info, warn
+
+logger = logging.getLogger(__name__)
 
 # ── Platform detection ───────────────────────────────────────────────────────
 
@@ -128,39 +121,30 @@ SD_URLS = {
     ("darwin", "arm64"): "https://github.com/chmln/sd/releases/download/v1.0.0/sd-v1.0.0-aarch64-apple-darwin.tar.gz",
 }
 
-
 # ── Download helpers ─────────────────────────────────────────────────────────
 
 
-def _download_file(url: str, dest: Path, label: str | None = None):
-    """Download *url* to *dest* with a Rich progress bar."""
+def _download_file(url: str, dest: Path, label: str | None = None, progress_callback: Callable[[int, int], None] = None):
+    """Download *url* to *dest*, reporting progress to *progress_callback*."""
     display = label or dest.name
 
-    # Open the connection to get Content-Length.
     req = urllib.request.Request(url, headers={"User-Agent": "AutomatiQ/bin-manager"})
     with urllib.request.urlopen(req) as resp:
         total = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[bold]{task.fields[label]}"),
-            BarColumn(bar_width=30),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            TimeRemainingColumn(),
-            transient=True,
-        ) as progress:
-            task = progress.add_task("download", total=total or None, label=display)
+        with open(dest, "wb") as fp:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                fp.write(chunk)
+                downloaded += len(chunk)
 
-            with open(dest, "wb") as fp:
-                while True:
-                    chunk = resp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    fp.write(chunk)
-                    progress.advance(task, len(chunk))
+                if progress_callback:
+                    progress_callback(downloaded, total)
 
-    info(f"Downloaded {display} ({dest.stat().st_size:,} bytes)")
+    logger.info(f"Downloaded {display} ({dest.stat().st_size:,} bytes)")
 
 
 def _make_executable(path: Path):
@@ -191,11 +175,12 @@ def _extract_binary_from_archive(archive_path: Path, binary_name: str, dest: Pat
                         _make_executable(dest)
                         return True
 
-    warn(f"Could not find {binary_name} inside {archive_path}")
+    logger.warning(f"Could not find {binary_name} inside {archive_path}")
     return False
 
 
 def _resolve_shim(path: Path) -> Path | None:
+    """Resolves Scoop shims on Windows to find the real executable."""
     if sys.platform != "win32":
         return None
     shim_file = path.with_suffix(".shim")
@@ -209,21 +194,26 @@ def _resolve_shim(path: Path) -> Path | None:
 
 
 def _copy_system_binary(found: str, dest: Path) -> bool:
+    """
+    On Mac/Linux: Does nothing! We trust the system PATH.
+    On Windows: Resolves shims and securely links the real .exe into our bin cache.
+    """
+    if sys.platform != "win32":
+        return True
+
     src = Path(found)
     resolved = _resolve_shim(src)
     if resolved:
         src = resolved
+
     try:
-        os.link(src, dest)
+        os.symlink(src, dest)
     except OSError:
-        shutil.copy2(src, dest)
+        shutil.copy(src, dest)
+        shutil.copymode(src, dest)
+
     try:
-        subprocess.run(
-            [str(dest), "--version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        )
+        subprocess.run([str(dest), "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
         return True
     except (subprocess.SubprocessError, OSError):
         dest.unlink(missing_ok=True)
@@ -233,7 +223,7 @@ def _copy_system_binary(found: str, dest: Path) -> bool:
 # ── Per-tool ensure functions ────────────────────────────────────────────────
 
 
-def _ensure_busybox(bin_dir: Path, os_name: str, arch: str):
+def _ensure_busybox(bin_dir: Path, os_name: str, arch: str, progress_callback: Callable[[int, int], None] = None):
     if os_name != "windows":
         return
     dest = bin_dir / "busybox.exe"
@@ -243,10 +233,10 @@ def _ensure_busybox(bin_dir: Path, os_name: str, arch: str):
     if found and _copy_system_binary(found, dest):
         return
     url, _ = _pick_busybox_url(arch)
-    _download_file(url, dest, label="busybox")
+    _download_file(url, dest, label="busybox", progress_callback=progress_callback)
 
 
-def _ensure_rg(bin_dir: Path, os_name: str, arch: str):
+def _ensure_rg(bin_dir: Path, os_name: str, arch: str, progress_callback: Callable[[int, int], None] = None):
     dest = bin_dir / _exe("rg")
     if dest.exists():
         return
@@ -255,15 +245,15 @@ def _ensure_rg(bin_dir: Path, os_name: str, arch: str):
         return
     url = RG_URLS.get((os_name, arch))
     if not url:
-        warn(f"No ripgrep download available for {os_name}/{arch}")
+        logger.warning(f"No ripgrep download available for {os_name}/{arch}")
         return
     tmp = bin_dir / os.path.basename(url)
-    _download_file(url, tmp, label="ripgrep")
+    _download_file(url, tmp, label="ripgrep", progress_callback=progress_callback)
     _extract_binary_from_archive(tmp, _exe("rg"), dest)
     tmp.unlink(missing_ok=True)
 
 
-def _ensure_jq(bin_dir: Path, os_name: str, arch: str):
+def _ensure_jq(bin_dir: Path, os_name: str, arch: str, progress_callback: Callable[[int, int], None] = None):
     dest = bin_dir / _exe("jq")
     if dest.exists():
         return
@@ -272,13 +262,13 @@ def _ensure_jq(bin_dir: Path, os_name: str, arch: str):
         return
     url = JQ_URLS.get((os_name, arch))
     if not url:
-        warn(f"No jq download available for {os_name}/{arch}")
+        logger.warning(f"No jq download available for {os_name}/{arch}")
         return
-    _download_file(url, dest, label="jq")
+    _download_file(url, dest, label="jq", progress_callback=progress_callback)
     _make_executable(dest)
 
 
-def _ensure_sd(bin_dir: Path, os_name: str, arch: str):
+def _ensure_sd(bin_dir: Path, os_name: str, arch: str, progress_callback: Callable[[int, int], None] = None):
     dest = bin_dir / _exe("sd")
     if dest.exists():
         return
@@ -287,10 +277,10 @@ def _ensure_sd(bin_dir: Path, os_name: str, arch: str):
         return
     url = SD_URLS.get((os_name, arch))
     if not url:
-        warn(f"No sd download available for {os_name}/{arch}")
+        logger.warning(f"No sd download available for {os_name}/{arch}")
         return
     tmp = bin_dir / os.path.basename(url)
-    _download_file(url, tmp, label="sd")
+    _download_file(url, tmp, label="sd", progress_callback=progress_callback)
     _extract_binary_from_archive(tmp, _exe("sd"), dest)
     tmp.unlink(missing_ok=True)
 
@@ -298,32 +288,32 @@ def _ensure_sd(bin_dir: Path, os_name: str, arch: str):
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
-def ensure_binaries() -> Path:
+def ensure_binaries(progress_callback: Callable[[int, int], None] = None) -> Path:
     """Check and download all required binaries. Returns the bin directory path."""
     bin_dir = config.BIN_DIR
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     os_name, arch = _detect_platform()
 
-    _ensure_busybox(bin_dir, os_name, arch)
-    _ensure_rg(bin_dir, os_name, arch)
-    _ensure_jq(bin_dir, os_name, arch)
-    _ensure_sd(bin_dir, os_name, arch)
+    _ensure_busybox(bin_dir, os_name, arch, progress_callback)
+    _ensure_rg(bin_dir, os_name, arch, progress_callback)
+    _ensure_jq(bin_dir, os_name, arch, progress_callback)
+    _ensure_sd(bin_dir, os_name, arch, progress_callback)
 
     if os_name == "windows":
         bb = bin_dir / "busybox.exe"
         if not bb.exists() and not shutil.which("busybox"):
-            error("busybox is required on Windows but was not found.")
-            error("Download manually from https://frippery.org/busybox/")
-            error("Place busybox.exe in: " + str(bin_dir))
+            logger.error("busybox is required on Windows but was not found.")
+            logger.error("Download manually from https://frippery.org/busybox/")
+            logger.error("Place busybox.exe in: " + str(bin_dir))
             sys.exit(1)
 
     # Only report missing tools; stay silent when everything is fine.
     tools = ["busybox", "rg", "jq", "sd"] if os_name == "windows" else ["rg", "jq", "sd"]
     missing = [t for t in tools if not (bin_dir / _exe(t)).exists() and not shutil.which(t)]
     if missing:
-        warn(f"Missing binaries: {', '.join(missing)}")
+        logger.warning(f"Missing binaries: {', '.join(missing)}")
     else:
-        info("Sandbox binaries ready.")
+        logger.info("Sandbox binaries ready.")
 
     return bin_dir

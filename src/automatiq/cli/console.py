@@ -6,7 +6,12 @@ This gives us consistent styling, color-coded log levels, and
 nice panels for agent output — all from a single shared Console.
 """
 
+import atexit
 import logging
+import os
+import signal
+import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -20,6 +25,8 @@ from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 from rich.theme import Theme
+
+from ..core.cancel_standard import CancelToken, StopToken
 
 _theme = Theme(
     {
@@ -146,7 +153,7 @@ def rule(title: str = "", style: str = "dim") -> None:
 
 def detail(msg: str) -> None:
     _log(logging.DEBUG, msg)
-    from . import config
+    from ..core import config
 
     if config.VERBOSE:
         console.print(f"  [dim]{escape(msg)}[/dim]")
@@ -172,3 +179,91 @@ def spinner(message: str = "Working..."):
 
 def prompt() -> str:
     return console.input("[bold green]>>> [/bold green]")
+
+
+def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken) -> threading.Event | None:
+    if not sys.stdin.isatty():
+        return None
+
+    active = threading.Event()
+    active.set()
+
+    # Catch raw OS SIGINT to prevent KeyboardInterrupt from crashing the main thread on the first press
+    try:
+
+        def sigint_handler(signum, frame):
+            if stop_token.is_stopped():
+                # Second press: Force a hard exit
+                print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
+                os._exit(1)
+            else:
+                stop_token.stop()
+
+        signal.signal(signal.SIGINT, sigint_handler)
+    except (ValueError, OSError):
+        pass  # Fails gracefully if not running in the main thread
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        def _listen():
+            while active.is_set():
+                if msvcrt.kbhit():
+                    key = msvcrt.getch()
+                    if key == b"\x1b":  # ESC
+                        cancel_token.cancel()
+                        while msvcrt.kbhit():
+                            msvcrt.getch()
+                    elif key == b"\x03":  # Ctrl+C
+                        if stop_token.is_stopped():
+                            print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
+                            os._exit(1)
+                        else:
+                            stop_token.stop()
+                        while msvcrt.kbhit():
+                            msvcrt.getch()
+                time.sleep(0.05)
+    else:
+        import select
+        import termios
+        import tty
+
+        def _listen():
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            # Remove ISIG flag so Ctrl+C (\x03) comes through as a normal char
+            new = termios.tcgetattr(fd)
+            new[3] = new[3] & ~termios.ISIG
+            termios.tcsetattr(fd, termios.TCSANOW, new)
+
+            def _restore():
+                try:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    termios.tcflush(fd, termios.TCIFLUSH)
+                except Exception:
+                    pass
+
+            atexit.register(_restore)
+
+            try:
+                tty.setcbreak(fd)
+                while active.is_set():
+                    r, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if r:
+                        key = os.read(fd, 1)
+                        if key == b"\x1b":  # ESC
+                            cancel_token.cancel()
+                            termios.tcflush(fd, termios.TCIFLUSH)
+                        elif key == b"\x03":  # Ctrl+C
+                            if stop_token.is_stopped():
+                                print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
+                                os._exit(1)
+                            else:
+                                stop_token.stop()
+                            termios.tcflush(fd, termios.TCIFLUSH)
+            finally:
+                _restore()
+
+    t = threading.Thread(target=_listen, daemon=True)
+    t.start()
+    return active

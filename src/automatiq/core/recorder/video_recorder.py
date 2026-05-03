@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 import threading
@@ -7,8 +8,7 @@ import imageio_ffmpeg
 import mss
 import numpy as np
 
-from ..console import error, info, log_exception, warn
-from ..console import video as log_video
+logger = logging.getLogger(__name__)
 
 FFMPEG_TIMEOUT = 120  # seconds — guard against hanging FFmpeg slice operations
 
@@ -26,7 +26,7 @@ class ActionVideoRecorder:
     def start(self) -> None:
         """Starts the screen recording in a background thread."""
         if self.is_recording:
-            warn("Recording is already active.")
+            logger.warning("Recording is already active.")
             return
 
         output_dir = os.path.dirname(self.output_path)
@@ -42,13 +42,13 @@ class ActionVideoRecorder:
 
     def _record_loop(self) -> None:
         """The core recording loop executed by the background thread."""
-        info(f"Initializing video writer at {self.fps} FPS...")
+        logger.info(f"Initializing video writer at {self.fps} FPS...")
         writer = None
 
         try:
             with mss.mss() as sct:
                 if not sct.monitors or len(sct.monitors) < 2:
-                    error("No monitors detected — cannot record screen.")
+                    logger.error("No monitors detected — cannot record screen.")
                     return
 
                 monitor = sct.monitors[1]
@@ -69,7 +69,7 @@ class ActionVideoRecorder:
 
                 # CRITICAL: Record the exact Unix timestamp immediately before the first frame
                 self.video_start_unix = time.time()
-                log_video(f"Recording started at UNIX {self.video_start_unix}")
+                logger.info(f"[VIDEO] Recording started at UNIX {self.video_start_unix}")
 
                 while self.is_recording:
                     loop_start = time.time()
@@ -83,23 +83,23 @@ class ActionVideoRecorder:
                         time.sleep(sleep_time)
 
         except Exception as e:
-            error(f"Video recording thread failed: {e}")
-            log_exception()
+            logger.error(f"Video recording thread failed: {e}")
+            logger.exception("Exception occurred")
         finally:
             if writer is not None:
                 try:
                     writer.close()
-                    log_video(f"Recording finalized and saved to {self.output_path}")
+                    logger.info(f"[VIDEO] Recording finalized and saved to {self.output_path}")
                 except Exception as e:
-                    error(f"Failed to close video writer: {e}")
-                    log_exception()
+                    logger.error(f"Failed to close video writer: {e}")
+                    logger.exception("Exception occurred")
 
     def stop(self) -> float | None:
         """Stops the recording thread and returns the exact start timestamp for alignment."""
         if not self.is_recording:
             return self.video_start_unix
 
-        info("Halting video recording...")
+        logger.info("Halting video recording...")
         self.is_recording = False
 
         if self.thread:
@@ -147,14 +147,14 @@ class ActionVideoRecorder:
             if os.path.exists(output_file) and os.path.getsize(output_file) > 5000:
                 return True
             else:
-                error(f"FFmpeg produced an empty or invalid clip for {output_file}.")
-                error(f"FFmpeg Error Log: {result.stderr}")
+                logger.error(f"FFmpeg produced an empty or invalid clip for {output_file}.")
+                logger.error(f"FFmpeg Error Log: {result.stderr}")
                 return False
 
         except subprocess.TimeoutExpired:
-            error(f"FFmpeg video split timed out after {FFMPEG_TIMEOUT}s for {output_file}")
+            logger.error(f"FFmpeg video split timed out after {FFMPEG_TIMEOUT}s for {output_file}")
             return False
         except Exception as e:
-            error(f"Unexpected error during video split: {e}")
-            log_exception()
+            logger.error(f"Unexpected error during video split: {e}")
+            logger.exception("Exception occurred")
             return False

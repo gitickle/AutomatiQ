@@ -12,7 +12,7 @@ import multiprocessing
 import sys
 import threading
 
-from .console import error, info, rule
+from .cli.console import error, info, rule
 
 # ---------------------------------------------------------------------------
 # Background preload — runs concurrently with the startup banner so that
@@ -58,13 +58,9 @@ def _peek_base_url() -> str | None:
 def _preload():
     global _preload_error
     try:
-        from . import config
+        from .core import config
 
         config.ensure_output_dirs()
-
-        from .console import init_file_logger
-
-        init_file_logger(str(config.LOGS_DIR))
 
         cmd = _peek_command()
 
@@ -72,17 +68,28 @@ def _preload():
 
         if _is_verbose:
             config.VERBOSE = True
-            import logging
 
-            handler = logging.StreamHandler()
-            handler.setFormatter(
-                logging.Formatter(
-                    "%(asctime)s  %(levelname)-5s  %(name)s  %(message)s",
-                    datefmt="%H:%M:%S",
-                )
-            )
-            logging.getLogger("automatiq").addHandler(handler)
-            logging.getLogger("automatiq").setLevel(logging.DEBUG)
+        import logging
+
+        from rich.logging import RichHandler
+
+        from .cli.console import console
+
+        level = logging.DEBUG if config.VERBOSE else logging.INFO
+
+        rich_handler = RichHandler(
+            console=console, show_time=False, show_path=config.VERBOSE, markup=False, rich_tracebacks=True
+        )
+        rich_handler.setLevel(level)
+
+        automatiq_logger = logging.getLogger("automatiq")
+        automatiq_logger.setLevel(logging.DEBUG)
+        automatiq_logger.handlers.clear()
+        automatiq_logger.addHandler(rich_handler)
+
+        from .cli.console import init_file_logger
+
+        init_file_logger(str(config.LOGS_DIR))
 
         if cmd in ("agent", "run", ""):
             import instructor  # noqa: F401
@@ -108,7 +115,7 @@ def _preload():
 
 
 def _apply_config_overrides(args):
-    from . import config
+    from .core import config
 
     if getattr(args, "model", None):
         config.AGENT_MODEL = args.model
@@ -135,52 +142,111 @@ def _apply_config_overrides(args):
 
 def cmd_record(args):
     _apply_config_overrides(args)
-    from . import config
-    from .key_checker import check_api_keys
+    from .core import config
+    from .core.key_checker import check_api_keys
 
     check_api_keys(config.AGENT_MODEL, config.RECORDER_AI_MODEL)
-    from .recorder import run_recording
+    from .cli.callbacks import get_cli_skip_callback
+    from .cli.console import start_cli_listeners
+    from .core.cancel_standard import CancelToken, StopRequestedException, StopToken
+    from .core.recorder import run_recording
 
-    success = run_recording(url=args.url)
+    cancel_token = CancelToken()
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
+    try:
+        success = run_recording(
+            url=args.url, cancel_token=cancel_token, stop_token=stop_token, skip_callback=get_cli_skip_callback()
+        )
+    except KeyboardInterrupt:
+        from .cli.console import warn
+
+        warn("KeyboardInterrupt caught in __main__.")
+        success = False
+    except StopRequestedException:
+        success = False
+    finally:
+        if monitor:
+            monitor.clear()
     if not success:
-        error("Recording failed or produced no output.")
+        error("Recording failed, aborted, or produced no output.")
         sys.exit(1)
     info("Recording complete. Run 'automatiq agent' to start the agent.")
 
 
 def cmd_agent(args):
     _apply_config_overrides(args)
-    from . import config
-    from .key_checker import check_api_keys
+    from .core import config
+    from .core.key_checker import check_api_keys
 
     check_api_keys(config.AGENT_MODEL)
-    from .bin_manager import ensure_binaries
+    from .core.bin_manager import ensure_binaries
 
     ensure_binaries()
-    from .main import run_agent
+    from .cli.console import start_cli_listeners
+    from .cli.orchestrator import run_agent_cli
+    from .core.cancel_standard import CancelToken, StopToken
 
-    run_agent()
+    cancel_token = CancelToken()
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
+    try:
+        run_agent_cli(cancel_token=cancel_token, stop_token=stop_token)
+    finally:
+        if monitor:
+            monitor.clear()
 
 
 def cmd_run(args):
     _apply_config_overrides(args)
-    from . import config
-    from .key_checker import check_api_keys
+    from .core import config
+    from .core.key_checker import check_api_keys
 
     check_api_keys(config.AGENT_MODEL, config.RECORDER_AI_MODEL)
-    from .bin_manager import ensure_binaries
-    from .main import run_agent
-    from .recorder import run_recording
+    from .cli.console import start_cli_listeners
+    from .cli.orchestrator import run_agent_cli
+    from .core.bin_manager import ensure_binaries
+    from .core.cancel_standard import CancelToken, StopRequestedException, StopToken
+    from .core.recorder import run_recording
 
     ensure_binaries()
 
-    success = run_recording(url=args.url)
+    from .cli.callbacks import get_cli_skip_callback
+
+    cancel_token = CancelToken()
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
+    try:
+        success = run_recording(
+            url=args.url, cancel_token=cancel_token, stop_token=stop_token, skip_callback=get_cli_skip_callback()
+        )
+    except KeyboardInterrupt:
+        from .cli.console import warn
+
+        warn("KeyboardInterrupt caught in __main__.")
+        success = False
+    except StopRequestedException:
+        success = False
+    finally:
+        if monitor:
+            monitor.clear()
     if not success:
-        error("Recording failed. Aborting agent launch.")
+        error("Recording failed or aborted. Aborting agent launch.")
         sys.exit(1)
 
     rule("Recording complete. Launching agent...", style="bold green")
-    run_agent()
+
+    cancel_token = CancelToken()
+    # We will pass stop_token down to the agent if we want, but for now we reset it
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
+    try:
+        run_agent_cli(cancel_token=cancel_token, stop_token=stop_token)
+    except StopRequestedException:
+        info("Agent aborted by user.")
+    finally:
+        if monitor:
+            monitor.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +258,8 @@ def _print_rich_help():
     from rich.table import Table
     from rich.text import Text
 
-    from . import config
-    from .console import console
+    from .cli.console import console
+    from .core import config
 
     console.print()
     ver = config.VERSION
@@ -274,7 +340,7 @@ def main():
     _is_version = any(a in sys.argv for a in ("--version", "-V"))
 
     if _is_version:
-        from . import config
+        from .core import config
 
         print(f"automatiq {config.VERSION}")
         sys.exit(0)
@@ -292,8 +358,8 @@ def main():
     preload_thread = threading.Thread(target=_preload, daemon=True)
     preload_thread.start()
 
-    from . import config
-    from .automatiq_banner import show_startup
+    from .cli.automatiq_banner import show_startup
+    from .core import config
 
     cmd = _peek_command()
     banner_model = _peek_model() or config.AGENT_MODEL

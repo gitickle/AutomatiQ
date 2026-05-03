@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 import re
 import shutil
@@ -7,21 +8,22 @@ import traceback
 from urllib.parse import urlparse
 
 from .. import config
-from ..console import ai as log_ai
-from ..console import detail, error, info, log_exception, print_exception, rule, success, warn
+from ..cancel_standard import StopRequestedException
 from .ai_analyzer import VideoActionAnalyzer
 from .video_recorder import ActionVideoRecorder
+
+logger = logging.getLogger(__name__)
 
 try:
     from magika import Magika
 
     magika_detector = Magika()
     MAGIKA_AVAILABLE = True
-    info("Magika AI detector initialized successfully.")
+    logger.info("Magika AI detector initialized successfully.")
 except ImportError:
     magika_detector = None
     MAGIKA_AVAILABLE = False
-    warn("Magika not installed. Skipping advanced content type detection.")
+    logger.warning("Magika not installed. Skipping advanced content type detection.")
 
 WORKSPACE_DIR = str(config.WORKSPACE_DIR)
 OUTPUT_DIR = os.path.join(WORKSPACE_DIR, "session_dump")
@@ -111,7 +113,7 @@ def detect_content_type(content, is_base64=False):
             "group": result.output.group,
         }
     except Exception as e:
-        warn(f"Magika error: {e}")
+        logger.warning(f"Magika error: {e}")
         return {"label": "unknown", "mime_type": "application/octet-stream", "extension": "bin", "error": str(e)}
 
 
@@ -123,7 +125,7 @@ def save_content(path, content, is_base64=False):
         try:
             data = base64.b64decode(content)
         except Exception as exc:
-            warn(f"Base64 decode failed for {path}, saving raw content instead: {exc}")
+            logger.warning(f"Base64 decode failed for {path}, saving raw content instead: {exc}")
             data = str(content).encode("utf-8")
     elif isinstance(content, str):
         data = content.encode("utf-8")
@@ -133,11 +135,18 @@ def save_content(path, content, is_base64=False):
         with open(path, mode) as f:
             f.write(data)
     except OSError as exc:
-        error(f"Failed to write content to {path}: {exc}")
-        log_exception()
+        logger.error(f"Failed to write content to {path}: {exc}")
+        logger.exception("Exception occurred")
 
 
-def merge_and_annotate_actions(actions: list[dict], full_video_path: str, video_start_unix: float) -> list[dict]:
+def merge_and_annotate_actions(
+    actions: list[dict],
+    full_video_path: str,
+    video_start_unix: float,
+    on_skip_requested: callable = None,
+    cancel_token=None,
+    stop_token=None,
+) -> list[dict]:
     if not actions or not video_start_unix or not os.path.exists(full_video_path):
         return actions
 
@@ -164,29 +173,21 @@ def merge_and_annotate_actions(actions: list[dict], full_video_path: str, video_
     recorder = ActionVideoRecorder(fps=config.FPS)
     ai_analyzer = VideoActionAnalyzer()
 
-    # Import Esc-key helpers from the recorder package.
-    from . import EscCancelled, check_esc_pressed, clear_esc_flag, run_interruptible
+    # Import CancelToken standard and cancellable runner from the parent package.
+    from ..cancel_standard import CancelRequestedException, run_cancellable
 
-    def _prompt_skip(remaining: int) -> bool:
-        """Ask the user whether to skip remaining AI segments. Returns True to skip."""
-        try:
-            answer = (
-                input(f"\n  Esc pressed. Skip AI analysis for remaining {remaining} segment(s)? (y/n): ").strip().lower()
-            )
-        except (KeyboardInterrupt, EOFError):
-            warn("Force-quitting.")
-            raise SystemExit(1) from None
-        clear_esc_flag()
-        return answer in ("y", "yes", "")
-
-    info(f"Extracting {len(merged_clips)} video action segments for AI...")
+    logger.info(f"Extracting {len(merged_clips)} video action segments for AI...")
     for idx, cluster in enumerate(merged_clips):
-        if check_esc_pressed():
+        if stop_token and stop_token.is_stopped():
+            logger.error("Compilation completely aborted by user (Ctrl+C).")
+            raise StopRequestedException("Compilation completely aborted by user.")
+
+        if cancel_token and cancel_token.is_cancelled():
             remaining = len(merged_clips) - idx
-            if _prompt_skip(remaining):
-                warn(f"Skipping AI analysis for remaining {remaining} segment(s).")
+            if on_skip_requested and on_skip_requested(remaining):
+                logger.warning(f"Skipping AI analysis for remaining {remaining} segment(s).")
                 break
-            info("Continuing AI analysis...")
+            logger.info("Continuing AI analysis...")
 
         first_action_time_relative = cluster[0]["timestamp_unix"] - video_start_unix
         clip_start = max(0, first_action_time_relative - config.SEGMENT_PAD_SECONDS)
@@ -201,21 +202,21 @@ def merge_and_annotate_actions(actions: list[dict], full_video_path: str, video_
 
         if clip_ok:
             try:
-                ai_description = run_interruptible(
+                ai_description = run_cancellable(
+                    cancel_token,
                     ai_analyzer.analyze_clip,
                     clip_path,
                     clip_end - clip_start,
                     raw_actions=cluster,
-                    cancel_check=check_esc_pressed,
                 )
-            except EscCancelled:
+            except CancelRequestedException:
                 remaining = len(merged_clips) - idx
-                if _prompt_skip(remaining):
-                    warn(f"Skipping AI analysis for remaining {remaining} segment(s).")
+                if on_skip_requested and on_skip_requested(remaining):
+                    logger.warning(f"Skipping AI analysis for remaining {remaining} segment(s).")
                     break
-                info("Continuing AI analysis...")
+                logger.info("Continuing AI analysis...")
                 continue
-            log_ai(f"Segment {idx:03d} summary: {ai_description.get('macro_summary')}")
+            logger.info(f"[AI] Segment {idx:03d} summary: {ai_description.get('macro_summary')}")
 
             for action in cluster:
                 action["ai_macro_summary"] = ai_description.get("macro_summary")
@@ -225,7 +226,7 @@ def merge_and_annotate_actions(actions: list[dict], full_video_path: str, video_
                 action["video_start_sec"] = round(clip_start, 2)
                 action["video_end_sec"] = round(clip_end, 2)
         else:
-            warn(
+            logger.warning(
                 f"Video split failed for segment {idx:03d} ({clip_start:.1f}s-{clip_end:.1f}s) "
                 f"— skipping AI annotation for {len(cluster)} action(s)"
             )
@@ -331,24 +332,31 @@ def process_network_requests(requests: list[dict]) -> tuple[list[dict], dict]:
             )
 
         except Exception as e:
-            error(f"Failed to process request at index {idx}: {e}")
-            log_exception()
+            logger.error(f"Failed to process request at index {idx}: {e}")
+            logger.exception("Exception occurred")
             error_filename = os.path.join(OUTPUT_DIR, f"CRASH_REPORT_{idx:03d}.txt")
             try:
                 with open(error_filename, "w", encoding="utf-8") as debug_f:
                     debug_f.write(f"ERROR: {str(e)}\n" + "-" * 50 + "\n")
                     debug_f.write(traceback.format_exc() + "\n" + "-" * 50 + "\n")
-                detail(f"  Crash report saved to {error_filename}")
+                logger.debug(f"  Crash report saved to {error_filename}")
             except OSError as write_exc:
-                warn(f"Could not write crash report to {error_filename}: {write_exc}")
+                logger.warning(f"Could not write crash report to {error_filename}: {write_exc}")
             continue
 
     return timeline_requests, detection_stats
 
 
-def compile_workspace(session_data: dict, full_video_path: str, video_start_unix: float) -> bool:
-    rule("Compiling Workspace", style="bold cyan")
-    info("Extracting data, and analyzing video...")
+def compile_workspace(
+    session_data: dict,
+    full_video_path: str,
+    video_start_unix: float,
+    on_skip_requested: callable = None,
+    cancel_token=None,
+    stop_token=None,
+) -> bool:
+    logger.info("[RULE] Compiling Workspace")
+    logger.info("Extracting data, and analyzing video...")
 
     try:
         if os.path.exists(WORKSPACE_DIR):
@@ -363,7 +371,9 @@ def compile_workspace(session_data: dict, full_video_path: str, video_start_unix
         timeline_events = []
 
         if actions:
-            actions = merge_and_annotate_actions(actions, full_video_path, video_start_unix)
+            actions = merge_and_annotate_actions(
+                actions, full_video_path, video_start_unix, on_skip_requested, cancel_token, stop_token
+            )
             for action in actions:
                 timeline_events.append(
                     {
@@ -398,7 +408,7 @@ def compile_workspace(session_data: dict, full_video_path: str, video_start_unix
 
         detection_stats = {}
         if requests:
-            info(f"Extracting {len(requests)} network requests and building transactions...")
+            logger.info(f"Extracting {len(requests)} network requests and building transactions...")
             network_events, detection_stats = process_network_requests(requests)
             timeline_events.extend(network_events)
 
@@ -458,15 +468,17 @@ def compile_workspace(session_data: dict, full_video_path: str, video_start_unix
         with open(os.path.join(OUTPUT_DIR, "session_metadata.json"), "w") as f:
             json.dump(make_serializable(metadata), f, indent=2)
 
-        success(f"Workspace compiled successfully at {OUTPUT_DIR}")
+        logger.info(f"[SUCCESS] Workspace compiled successfully at {OUTPUT_DIR}")
         if MAGIKA_AVAILABLE:
-            detail(f"Payloads detected: {detection_stats.get('request_detected', 0)}")
-            detail(f"Bodies detected: {detection_stats.get('response_detected', 0)}")
-            detail(f"MIME mismatches: {detection_stats.get('mismatches', 0)}")
-        rule(style="bold cyan")
+            logger.debug(f"Payloads detected: {detection_stats.get('request_detected', 0)}")
+            logger.debug(f"Bodies detected: {detection_stats.get('response_detected', 0)}")
+            logger.debug(f"MIME mismatches: {detection_stats.get('mismatches', 0)}")
         return True
 
+    except StopRequestedException as e:
+        logger.error(str(e))
+        return False
     except Exception as e:
-        error(f"Workspace compilation failed: {e}")
-        print_exception()
+        logger.error(f"Workspace compilation failed: {e}")
+        logger.exception("Exception occurred")
         return False

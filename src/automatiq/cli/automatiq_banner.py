@@ -232,7 +232,9 @@ def show_startup(
         frames_path:    Path to gol_frames.json. Auto-detected if None.
     """
     if _should_skip():
-        print(f"  \033[36m▸\033[0m \033[1mautomatiq\033[0m \033[2mv{version} · {model}\033[0m")
+        from .console import console
+
+        console.print(f"  [cyan]>[/cyan] [bold]automatiq[/bold] [dim]v{version} - {model}[/dim]")
         return
 
     if frames_path is None:
@@ -241,7 +243,9 @@ def show_startup(
     try:
         forward_frames, gh, gw = _load_frames(frames_path)
     except (FileNotFoundError, KeyError, ValueError):
-        print(f"  \033[36m▸\033[0m \033[1mautomatiq\033[0m \033[2mv{version} · {model}\033[0m")
+        from .console import console
+
+        console.print(f"  [cyan]>[/cyan] [bold]automatiq[/bold] [dim]v{version} - {model}[/dim]")
         return
 
     # Play in reverse: dissolved → coalesced

@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 import subprocess
 
@@ -8,7 +9,8 @@ import litellm
 from pydantic import BaseModel, Field
 
 from .. import config
-from ..console import error, info, log_exception, warn
+
+logger = logging.getLogger(__name__)
 
 
 class VideoActionAnalysis(BaseModel):
@@ -45,8 +47,8 @@ class VideoActionAnalyzer:
         try:
             self.client = instructor.from_litellm(litellm.completion, mode=instructor.Mode.MD_JSON)
         except Exception as exc:
-            error(f"Failed to initialise instructor/litellm client: {exc}")
-            log_exception()
+            logger.error(f"Failed to initialise instructor/litellm client: {exc}")
+            logger.exception("Exception occurred")
             raise
 
     def _get_base64_frames(self, video_path: str, duration_sec: float, cancel_check=None) -> list[str]:
@@ -56,7 +58,7 @@ class VideoActionAnalyzer:
         it returns True the extraction is aborted early.
         """
         if not os.path.exists(video_path):
-            error(f"Video file not found: {video_path}")
+            logger.error(f"Video file not found: {video_path}")
             return []
 
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -103,11 +105,11 @@ class VideoActionAnalyzer:
             return base64_frames
 
         except subprocess.TimeoutExpired:
-            error(f"FFmpeg frame extraction timed out after {self.SUBPROCESS_TIMEOUT}s for {video_path}")
+            logger.error(f"FFmpeg frame extraction timed out after {self.SUBPROCESS_TIMEOUT}s for {video_path}")
             return []
         except Exception as e:
-            error(f"FFmpeg frame extraction failed for {video_path}: {e}")
-            log_exception()
+            logger.error(f"FFmpeg frame extraction failed for {video_path}: {e}")
+            logger.exception("Exception occurred")
             return []
 
     @staticmethod
@@ -185,7 +187,7 @@ class VideoActionAnalyzer:
         for b64 in base64_frames:
             content.append({"type": "image_url", "image_url": {"url": b64}})
 
-        info(f"Prompting Instructor Vision AI with {len(base64_frames)} frames...")
+        logger.info(f"Prompting Instructor Vision AI with {len(base64_frames)} frames...")
 
         try:
             kwargs = dict(
@@ -208,10 +210,10 @@ class VideoActionAnalyzer:
 
             if self._is_fatal(e):
                 self._ai_disabled = True
-                error(f"LLM unreachable: {reason}")
-                warn("Skipping AI analysis for remaining segments.")
+                logger.error(f"LLM unreachable: {reason}")
+                logger.warning("Skipping AI analysis for remaining segments.")
             else:
-                error(f"AI analysis failed: {reason}")
+                logger.error(f"AI analysis failed: {reason}")
 
-            log_exception()
+            logger.exception("Exception occurred")
             return error_resp

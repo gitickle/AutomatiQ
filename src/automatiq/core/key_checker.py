@@ -6,12 +6,14 @@ actionable error if their environment is missing keys or has invalid ones —
 rather than failing deep inside the agent loop with a cryptic API error.
 """
 
+import logging
 import sys
 
 import litellm
 
 from . import config
-from .console import detail, error, info, success
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_model(model: str) -> bool:
@@ -29,10 +31,10 @@ def _validate_model(model: str) -> bool:
 
     missing = result.get("missing_keys", [])
     if missing:
-        error(f"Model '{model}' requires environment variables that are not set:")
+        logger.error(f"Model '{model}' requires environment variables that are not set:")
         for key in missing:
-            detail(f"  {key}")
-        detail("Set them in your .env file or export them before running.")
+            logger.debug(f"  {key}")
+        logger.debug("Set them in your .env file or export them before running.")
         return False
 
     return True
@@ -52,7 +54,7 @@ def check_api_keys(*models: str) -> None:
     # When a custom base URL is set the requests go to a user-controlled
     # endpoint — standard provider API keys are not required.
     if config.API_BASE:
-        info(f"Custom endpoint ({config.API_BASE}) — skipping key validation.")
+        logger.info(f"Custom endpoint ({config.API_BASE}) — skipping key validation.")
         return
 
     failed: list[str] = []
@@ -68,9 +70,9 @@ def check_api_keys(*models: str) -> None:
             failed.append(model)
 
     if failed:
-        error(f"{len(failed)} model(s) failed key validation — cannot continue.")
+        logger.error(f"{len(failed)} model(s) failed key validation — cannot continue.")
         for m in failed:
-            detail(f"  {m}")
+            logger.debug(f"  {m}")
         sys.exit(1)
 
-    success("API keys validated.")
+    logger.info("[SUCCESS] API keys validated.")
