@@ -70,7 +70,7 @@ def test_python_script_syntax_validation():
 
     # Incomplete blocks (unclosed string)
     with pytest.raises(ValidationError) as exc:
-        PythonScript(ipython_script="print('hello")
+        PythonScript(ipython_script='print("""hello')
     assert "Incomplete code: the cell expects more lines" in str(exc.value)
 
     # Deep syntax error caught by compile()

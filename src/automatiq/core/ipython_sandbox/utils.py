@@ -151,19 +151,22 @@ def parse_offset(offset_str: str) -> tuple[int, int]:
     raise ValueError(f"Invalid offset format: {offset_str}")
 
 
-def interrupt_process(process, interrupt_event):
+def interrupt_process(process, interrupt_event=None):
+    if not process or not process.pid:
+        return
+
     if sys.platform == "win32":
         logger.debug("Attempting soft interrupt via Threading Event (Windows).")
-        interrupt_event.set()
+        if interrupt_event:
+            interrupt_event.set()
     else:
         import signal
 
-        if process and process.pid:
-            logger.debug(f"Attempting soft interrupt via SIGINT to PGID {os.getpgid(process.pid)} (POSIX).")
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGINT)
-            except ProcessLookupError:
-                logger.debug(f"Process PID {process.pid} not found for soft interrupt.")
+        logger.debug(f"Attempting soft interrupt via SIGINT to PGID {os.getpgid(process.pid)} (POSIX).")
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGINT)
+        except ProcessLookupError:
+            logger.debug(f"Process PID {process.pid} not found for soft interrupt.")
 
 
 def hard_kill_process(process):

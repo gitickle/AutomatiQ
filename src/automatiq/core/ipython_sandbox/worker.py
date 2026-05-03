@@ -2,6 +2,7 @@ import multiprocessing
 import os
 import sys
 import threading
+import time
 
 BUSYBOX_COMMANDS = [
     "ls",
@@ -34,17 +35,10 @@ BUSYBOX_COMMANDS = [
     "tail",
     "sh",
 ]
-
 STANDALONE_COMMANDS = ["rg", "jq", "sd"]
 
 
 def apply_path_jail(bin_dir: str, workspace: str):
-    """Creates an isolated PATH environment.
-
-    Windows: BusyBox multicall binary provides coreutils; PATH is wiped to jailed_bin only.
-    POSIX:   System coreutils already exist in /usr/bin; jailed_bin is prepended to PATH
-             so our standalone binaries (rg, jq, sd) take priority.
-    """
     jailed_bin = os.path.join(workspace, ".jailed_bin")
     os.makedirs(jailed_bin, exist_ok=True)
 
@@ -60,14 +54,11 @@ def apply_path_jail(bin_dir: str, workspace: str):
                         import shutil
 
                         shutil.copy2(bb_src, dst)
-        else:
-            print(f"[WARN] Path jail failed: Could not find {bb_src}")
 
     for cmd in STANDALONE_COMMANDS:
         exe_name = f"{cmd}.exe" if sys.platform == "win32" else cmd
         src = os.path.join(bin_dir, exe_name)
         dst = os.path.join(jailed_bin, exe_name)
-
         if os.path.exists(src) and not os.path.exists(dst):
             try:
                 os.link(src, dst)
@@ -80,8 +71,6 @@ def apply_path_jail(bin_dir: str, workspace: str):
         os.environ["PATH"] = jailed_bin
         os.environ["COMSPEC"] = os.path.join(jailed_bin, "sh.exe")
     else:
-        # Prepend jailed_bin so our binaries take priority, but keep system PATH
-        # for coreutils (/usr/bin/ls, /usr/bin/grep, etc.)
         os.environ["PATH"] = jailed_bin + os.pathsep + os.environ.get("PATH", "/usr/bin")
         os.environ["SHELL"] = "/bin/sh"
 
@@ -123,6 +112,7 @@ def ipython_worker(
         poller.start()
 
     from IPython.core.interactiveshell import InteractiveShell
+    from IPython.utils.capture import capture_output
     from traitlets.config import Config
 
     c = Config()
@@ -133,41 +123,81 @@ def ipython_worker(
 
     shell = InteractiveShell.instance(config=c)
 
+    if hasattr(shell, "enable_matplotlib"):
+        try:
+            shell.enable_matplotlib("inline")
+        except Exception:
+            pass
+
+    shell.displayhook.write_output_prompt = lambda: None
+    shell.displayhook.write_format_data = lambda *args, **kwargs: None
+
     if sys.platform == "win32":
         import subprocess
 
         from IPython.utils.text import SList
 
-        sh_path = os.path.join(os.environ["PATH"], "sh.exe")
+        sh_path = os.path.join(os.environ["PATH"], "sh.exe") if "PATH" in os.environ else "sh.exe"
 
         def busybox_system(cmd):
-            """Handles standard interactive shell commands: !ls"""
-            subprocess.run([sh_path, "-c", cmd], stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL)
+            p = subprocess.Popen([sh_path, "-c", cmd], stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL)
+            try:
+                while p.poll() is None:
+                    time.sleep(0.05)
+            except KeyboardInterrupt:
+                p.terminate()
+                try:
+                    p.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                raise
 
         def busybox_getoutput(cmd, split=True, depth=0):
-            """Handles captured shell commands: x = !ls"""
+            out = ""
             try:
-                result = subprocess.run(
+                p = subprocess.Popen(
                     [sh_path, "-c", cmd],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    stdin=subprocess.DEVNULL,
                 )
-                out = result.stdout
+                out_chunks = []
+
+                def reader():
+                    try:
+                        while True:
+                            chunk = p.stdout.read(1024)
+                            if not chunk:
+                                break
+                            out_chunks.append(chunk)
+                    except Exception:
+                        pass
+
+                t_read = threading.Thread(target=reader, daemon=True)
+                t_read.start()
+                while p.poll() is None:
+                    time.sleep(0.05)
+                t_read.join(timeout=0.2)
+                out = "".join(out_chunks)
+            except KeyboardInterrupt:
+                p.terminate()
+                try:
+                    p.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                raise
             except Exception as e:
                 out = str(e)
-
             if split:
                 return SList(out.splitlines())
             return out
 
-        shell.system = busybox_system
-        shell.getoutput = busybox_getoutput
-
-    shell.displayhook.write_output_prompt = lambda: None
-    shell.displayhook.write_format_data = lambda *args, **kwargs: None
+        if os.path.exists(sh_path):
+            shell.system = busybox_system
+            shell.getoutput = busybox_getoutput
 
     while True:
         try:
@@ -187,8 +217,11 @@ def ipython_worker(
                 sys.stdout = f
                 sys.stderr = f
 
+                captured_outputs = []
                 try:
-                    result = shell.run_cell(command, cell_id=cell_id)
+                    with capture_output(stdout=False, stderr=False, display=True) as captured:
+                        result = shell.run_cell(command, cell_id=cell_id)
+                    captured_outputs = captured.outputs
                 except KeyboardInterrupt:
                     raise
                 finally:
@@ -196,10 +229,8 @@ def ipython_worker(
                         sys.stdout.flush()
                     if hasattr(sys.stderr, "flush"):
                         sys.stderr.flush()
-
                     sys.stdout = original_stdout
                     sys.stderr = original_stderr
-
                     os.dup2(original_stdout_fd, 1)
                     os.dup2(original_stderr_fd, 2)
                     os.close(original_stdout_fd)
@@ -208,9 +239,28 @@ def ipython_worker(
             ret_val = ""
             error = result.error_in_exec or result.error_before_exec
             if error:
-                ret_val = str(error)
+                pass
             elif result.result is not None:
-                ret_val = str(result.result)
+                ret_val = repr(result.result)
+
+            rich_info = []
+            for idx, out in enumerate(captured_outputs):
+                if "image/png" in out.data:
+                    import base64
+
+                    img_data = base64.b64decode(out.data["image/png"])
+                    img_name = f"{cell_id}_img_{idx}.png"
+                    try:
+                        with open(img_name, "wb") as img_f:
+                            img_f.write(img_data)
+                        rich_info.append(f"[Image generated: {img_name}]")
+                    except Exception as e:
+                        rich_info.append(f"[Image generation failed: {e}]")
+
+            if rich_info:
+                if ret_val:
+                    ret_val += "\n"
+                ret_val += "\n".join(rich_info)
 
             result_queue.put(
                 {
@@ -222,6 +272,5 @@ def ipython_worker(
 
         except KeyboardInterrupt:
             result_queue.put({"status": "error", "exit_code": 1, "ret_val": "KeyboardInterrupt"})
-
         except BaseException as e:
             result_queue.put({"status": "crash", "exit_code": 1, "ret_val": f"Shell Error: {str(e)}"})
