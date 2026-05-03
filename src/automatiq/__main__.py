@@ -62,10 +62,6 @@ def _preload():
 
         config.ensure_output_dirs()
 
-        from .cli.console import init_file_logger
-
-        init_file_logger(str(config.LOGS_DIR))
-
         cmd = _peek_command()
 
         _is_verbose = "--verbose" in sys.argv
@@ -90,6 +86,10 @@ def _preload():
         automatiq_logger.setLevel(logging.DEBUG)
         automatiq_logger.handlers.clear()
         automatiq_logger.addHandler(rich_handler)
+
+        from .cli.console import init_file_logger
+
+        init_file_logger(str(config.LOGS_DIR))
 
         if cmd in ("agent", "run", ""):
             import instructor  # noqa: F401
@@ -147,19 +147,29 @@ def cmd_record(args):
 
     check_api_keys(config.AGENT_MODEL, config.RECORDER_AI_MODEL)
     from .cli.callbacks import get_cli_skip_callback
-    from .cli.console import start_cli_esc_listener
-    from .core.cancel_standard import CancelToken
+    from .cli.console import start_cli_listeners
+    from .core.cancel_standard import CancelToken, StopRequestedException, StopToken
     from .core.recorder import run_recording
 
-    token = CancelToken()
-    monitor = start_cli_esc_listener(token)
+    cancel_token = CancelToken()
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
     try:
-        success = run_recording(url=args.url, cancel_token=token, skip_callback=get_cli_skip_callback())
+        success = run_recording(
+            url=args.url, cancel_token=cancel_token, stop_token=stop_token, skip_callback=get_cli_skip_callback()
+        )
+    except KeyboardInterrupt:
+        from .cli.console import warn
+
+        warn("KeyboardInterrupt caught in __main__.")
+        success = False
+    except StopRequestedException:
+        success = False
     finally:
         if monitor:
             monitor.clear()
     if not success:
-        error("Recording failed or produced no output.")
+        error("Recording failed, aborted, or produced no output.")
         sys.exit(1)
     info("Recording complete. Run 'automatiq agent' to start the agent.")
 
@@ -173,14 +183,15 @@ def cmd_agent(args):
     from .core.bin_manager import ensure_binaries
 
     ensure_binaries()
-    from .cli.console import start_cli_esc_listener
+    from .cli.console import start_cli_listeners
     from .cli.orchestrator import run_agent_cli
-    from .core.cancel_standard import CancelToken
+    from .core.cancel_standard import CancelToken, StopToken
 
-    token = CancelToken()
-    monitor = start_cli_esc_listener(token)
+    cancel_token = CancelToken()
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
     try:
-        run_agent_cli(cancel_token=token)
+        run_agent_cli(cancel_token=cancel_token, stop_token=stop_token)
     finally:
         if monitor:
             monitor.clear()
@@ -192,33 +203,47 @@ def cmd_run(args):
     from .core.key_checker import check_api_keys
 
     check_api_keys(config.AGENT_MODEL, config.RECORDER_AI_MODEL)
-    from .cli.console import start_cli_esc_listener
+    from .cli.console import start_cli_listeners
     from .cli.orchestrator import run_agent_cli
     from .core.bin_manager import ensure_binaries
-    from .core.cancel_standard import CancelToken
+    from .core.cancel_standard import CancelToken, StopRequestedException, StopToken
     from .core.recorder import run_recording
 
     ensure_binaries()
 
     from .cli.callbacks import get_cli_skip_callback
 
-    token = CancelToken()
-    monitor = start_cli_esc_listener(token)
+    cancel_token = CancelToken()
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
     try:
-        success = run_recording(url=args.url, cancel_token=token, skip_callback=get_cli_skip_callback())
+        success = run_recording(
+            url=args.url, cancel_token=cancel_token, stop_token=stop_token, skip_callback=get_cli_skip_callback()
+        )
+    except KeyboardInterrupt:
+        from .cli.console import warn
+
+        warn("KeyboardInterrupt caught in __main__.")
+        success = False
+    except StopRequestedException:
+        success = False
     finally:
         if monitor:
             monitor.clear()
     if not success:
-        error("Recording failed. Aborting agent launch.")
+        error("Recording failed or aborted. Aborting agent launch.")
         sys.exit(1)
 
     rule("Recording complete. Launching agent...", style="bold green")
 
-    token = CancelToken()
-    monitor = start_cli_esc_listener(token)
+    cancel_token = CancelToken()
+    # We will pass stop_token down to the agent if we want, but for now we reset it
+    stop_token = StopToken()
+    monitor = start_cli_listeners(cancel_token, stop_token)
     try:
-        run_agent_cli(cancel_token=token)
+        run_agent_cli(cancel_token=cancel_token, stop_token=stop_token)
+    except StopRequestedException:
+        info("Agent aborted by user.")
     finally:
         if monitor:
             monitor.clear()

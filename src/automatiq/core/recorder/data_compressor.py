@@ -8,6 +8,7 @@ import traceback
 from urllib.parse import urlparse
 
 from .. import config
+from ..cancel_standard import StopRequestedException
 from .ai_analyzer import VideoActionAnalyzer
 from .video_recorder import ActionVideoRecorder
 
@@ -144,6 +145,7 @@ def merge_and_annotate_actions(
     video_start_unix: float,
     on_skip_requested: callable = None,
     cancel_token=None,
+    stop_token=None,
 ) -> list[dict]:
     if not actions or not video_start_unix or not os.path.exists(full_video_path):
         return actions
@@ -176,6 +178,10 @@ def merge_and_annotate_actions(
 
     logger.info(f"Extracting {len(merged_clips)} video action segments for AI...")
     for idx, cluster in enumerate(merged_clips):
+        if stop_token and stop_token.is_stopped():
+            logger.error("Compilation completely aborted by user (Ctrl+C).")
+            raise StopRequestedException("Compilation completely aborted by user.")
+
         if cancel_token and cancel_token.is_cancelled():
             remaining = len(merged_clips) - idx
             if on_skip_requested and on_skip_requested(remaining):
@@ -347,6 +353,7 @@ def compile_workspace(
     video_start_unix: float,
     on_skip_requested: callable = None,
     cancel_token=None,
+    stop_token=None,
 ) -> bool:
     logger.info("[RULE] Compiling Workspace")
     logger.info("Extracting data, and analyzing video...")
@@ -365,7 +372,7 @@ def compile_workspace(
 
         if actions:
             actions = merge_and_annotate_actions(
-                actions, full_video_path, video_start_unix, on_skip_requested, cancel_token
+                actions, full_video_path, video_start_unix, on_skip_requested, cancel_token, stop_token
             )
             for action in actions:
                 timeline_events.append(
@@ -468,6 +475,9 @@ def compile_workspace(
             logger.debug(f"MIME mismatches: {detection_stats.get('mismatches', 0)}")
         return True
 
+    except StopRequestedException as e:
+        logger.error(str(e))
+        return False
     except Exception as e:
         logger.error(f"Workspace compilation failed: {e}")
         logger.exception("Exception occurred")

@@ -3,7 +3,7 @@ import queue
 import threading
 
 from ..core import events
-from ..core.cancel_standard import CancelToken
+from ..core.cancel_standard import CancelToken, StopToken
 from ..core.main import run_agent
 from .console import (
     code_block,
@@ -99,15 +99,26 @@ def handle_log_error(sender, text, **kwargs):
     error(text)
 
 
-def run_agent_cli(cancel_token: CancelToken = None):
+def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None):
     if cancel_token is None:
         cancel_token = CancelToken()
+    if stop_token is None:
+        stop_token = StopToken()
 
     input_queue = queue.Queue()
 
     @events.wait_start.connect
     def handle_wait_start(sender, seconds, reason, **kwargs):
-        cancelled = countdown(seconds, message=reason, cancel_check=cancel_token.is_cancelled)
+        # We pass stop_check to countdown if we update countdown later, but for now
+        # let's just use stop_token.is_stopped inside the loop
+        def should_abort():
+            if stop_token.is_stopped():
+                from ..core.cancel_standard import StopRequestedException
+
+                raise StopRequestedException()
+            return cancel_token.is_cancelled()
+
+        cancelled = countdown(seconds, message=reason, cancel_check=should_abort)
         if cancelled:
             cancel_token.reset()
             events.operation_cancelled.send("core")
@@ -127,6 +138,7 @@ def run_agent_cli(cancel_token: CancelToken = None):
 
     def backend_worker():
         try:
+            # We don't have run_agent signature yet, assuming it only takes cancel_token right now
             run_agent(input_queue=input_queue, cancel_token=cancel_token)
         except Exception:
             logger.exception("Agent loop crashed")
@@ -137,22 +149,20 @@ def run_agent_cli(cancel_token: CancelToken = None):
     t.start()
 
     try:
-        # Since Blinker handlers are executed in the sender's thread (which is `backend_worker`),
-        # they might run into threading issues if Rich wasn't thread-safe (it mostly is).
-        # We need the main thread to stay alive until agent_done.
         done_event = threading.Event()
 
         @events.agent_done.connect
         def handle_agent_done(sender, **kwargs):
             done_event.set()
 
-        # Wait for the backend thread to finish, keeping main thread alive for interrupts
         while not done_event.wait(timeout=0.1):
-            pass
+            if stop_token.is_stopped():
+                info("Abort requested via UI StopToken (Ctrl+C). Exiting...")
+                break
 
     except KeyboardInterrupt:
-        info("Interrupted by user (Ctrl+C). Exiting...")
-        cancel_token.cancel()
+        info("Interrupted by OS user signal (Ctrl+C). Exiting...")
+        stop_token.stop()
     finally:
         global _active_spinner
         if _active_spinner:

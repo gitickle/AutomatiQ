@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import tempfile
 import time
 import uuid
 from datetime import UTC, datetime
@@ -51,7 +52,7 @@ class BrowserAgent:
         self.telemetry_js_path = telemetry_js_path or os.path.join(_js_dir, "telemetry.js")
         self.visuals_js_path = visuals_js_path or os.path.join(_js_dir, "visuals.js")
         self.blocklist = blocklist
-        self.recording_active = False
+        self._profile_dir = tempfile.TemporaryDirectory(prefix="automatiq_chrome_")
         self.browser = None
         self.tab = None
         self.recording_start = None
@@ -243,10 +244,13 @@ class BrowserAgent:
                 # we enabled streaming — store it as the first chunk
                 if buffered:
                     self._streamed_bodies[rid].append(base64.b64decode(buffered))
-            except Exception:
-                # Streaming not supported or request already done — that's fine,
-                # getResponseBody will still work for most responses.
-                pass
+            except Exception as e:
+                # If Chrome says it's already finished, silently ignore it.
+                if "already finished loading" in str(e):
+                    pass
+                else:
+                    # If it's some OTHER weird error, we still want to know about it.
+                    logger.warning(f"stream_resource_content failed: {e}")
 
     async def loading_finished_handler(self, event: cdp.network.LoadingFinished):
         if event.request_id in self.active_map:
@@ -423,16 +427,17 @@ class BrowserAgent:
                 logger.warning(f"Failed to initialise CDP on new tab {target_info.target_id}: {exc}")
                 logger.exception("Exception occurred")
 
-    async def run_session(self, url: str) -> dict:
+    async def run_session(self, url: str, stop_token=None) -> dict:
         if not self._load_scripts():
             return {}
 
         try:
             logger.info("Starting Zendriver Browser...")
-            self.browser = await zd.start(headless=False, browser_args=["--incognito", "--disable-popup-blocking"])
+            self.browser = await zd.start(
+                headless=False,
+                browser_args=["--incognito", "--disable-popup-blocking", f"--user-data-dir={self._profile_dir.name}"],
+            )
             self.recording_start = datetime.now(UTC)
-            self.recording_active = True
-
             self.tab = await self.browser.get("about:blank")
 
             logger.info("Enabling CDP domains and binding handlers...")
@@ -472,19 +477,22 @@ class BrowserAgent:
             logger.info(f"Navigating to {url}")
             await self.tab.send(cdp.page.navigate(url=url))
 
-            while self.recording_active:
+            while not (stop_token and stop_token.is_stopped()):
                 await asyncio.sleep(0.1)
 
+        except asyncio.CancelledError:
+            logger.info("Session asyncio loop cancelled.")
+            if stop_token:
+                stop_token.stop()
+        except KeyboardInterrupt:
+            logger.warning("Session encountered KeyboardInterrupt.")
+            if stop_token:
+                stop_token.stop()
         except Exception as e:
             logger.error(f"Session encountered an error: {e}")
             logger.exception("Exception occurred")
 
         return await self._cleanup_and_build_report()
-
-    def stop(self):
-        """Safely signals the asynchronous run_session loop to terminate."""
-        logger.info("Halting browser agent session...")
-        self.recording_active = False
 
     async def _wait_for_pending_requests(self, timeout: float = 10.0, idle_time: float = 1.0) -> None:
         """Wait until all tracked requests in active_map have resolved
@@ -524,7 +532,10 @@ class BrowserAgent:
 
     async def _cleanup_and_build_report(self) -> dict:
         # Let in-flight requests settle before tearing down
-        await self._wait_for_pending_requests()
+        try:
+            await asyncio.wait_for(self._wait_for_pending_requests(), timeout=10.0)
+        except TimeoutError:
+            logger.warning("Timeout waiting for pending requests. Moving on.")
 
         logger.info("Processing incomplete network requests...")
 
@@ -550,10 +561,14 @@ class BrowserAgent:
 
         try:
             if self.browser:
-                await self.browser.stop()
+                await asyncio.wait_for(self.browser.stop(), timeout=5.0)
         except Exception as exc:
-            logger.warning(f"Failed to stop browser cleanly: {exc}")
-            logger.exception("Exception occurred")
+            logger.warning(f"Failed to stop browser cleanly, ignoring: {exc}")
+
+        try:
+            self._profile_dir.cleanup()
+        except Exception as exc:
+            logger.warning(f"Could not clean up temporary Chrome profile: {exc}")
 
         recording_end = datetime.now(UTC)
         duration = (recording_end - self.recording_start).total_seconds() if self.recording_start else 0.0

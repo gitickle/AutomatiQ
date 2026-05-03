@@ -8,6 +8,31 @@ all OS-level Esc-key polling that previously read raw bytes from stdin.
 import threading
 
 
+class StopToken:
+    """A thread-safe stop flag passed to completely abort operations (e.g. via Ctrl+C)."""
+
+    def __init__(self):
+        self._event = threading.Event()
+
+    def stop(self):
+        """Set the stop flag."""
+        self._event.set()
+
+    def reset(self):
+        """Clear the stop flag."""
+        self._event.clear()
+
+    def is_stopped(self) -> bool:
+        """Check if stop was requested."""
+        return self._event.is_set()
+
+
+class StopRequestedException(Exception):
+    """Raised when an operation is completely aborted via StopToken."""
+
+    pass
+
+
 class CancelToken:
     """A thread-safe cancellation flag passed to long-running tasks."""
 
