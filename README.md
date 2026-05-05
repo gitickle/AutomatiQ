@@ -18,25 +18,23 @@
 
 # AutomatiQ
 
-> **Alpha** — Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand why Automatiq exists and where it's headed.
+> [!Note]
+> **Alpha** 🡒 Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand why Automatiq exists and where it's headed.
 
 AutomatiQ watches you browse, then an AI agent reverse-engineers your session
 into a standalone Python automation/extraction script; no manual inspection needed.
 
 ## What it does
 
-```
-1. RECORD                      2. COMPILE                        3. AGENT
-   Browse a website     ==>       AI analyses video      ==>        LLM investigates,
-   normally                       clips & network                   writes & tests
-                                  requests                          a Python script
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/process.svg" alt="AutomatiQ" width="800">
+</p>
 
-1. **Record** — Opens Chrome, captures your browsing (screen video, network
+1. **Record** ⭢ Opens Chrome, captures your browsing (screen video, network
    requests, user actions). Press `Ctrl+C` when you're done.
-2. **Compile** — Vision AI analyses video clips around each action; network
+2. **Compile** ⭢ Vision AI analyses video clips around each action; network
    requests are decoded, deduplicated, and structured into a workspace dump.
-3. **Agent** — An LLM investigator reads the workspace, experiments in a
+3. **Agent** ⭢ An LLM investigator reads the workspace, experiments in a
    sandboxed IPython environment, and iteratively produces a working script.
 
 ## Quick start
