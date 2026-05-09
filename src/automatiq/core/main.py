@@ -379,7 +379,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
             model=config.AGENT_MODEL,
             messages=msgs,
             tools=AGENT_TOOLS,
-            tool_choice="required",
+            tool_choice="auto",
             temperature=0.3,
             timeout=30,
         )
