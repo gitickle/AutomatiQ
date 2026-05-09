@@ -597,7 +597,16 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
 
                 events.log_info.send("core", text="Agent submitted the final script.")
                 events.tool_message.send("core", text=f"\n--- FINAL SCRIPT ---\n\n{script_content}\n")
-                break
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
+                        "content": "Final script delivered successfully to the user. Awaiting feedback.",
+                    }
+                )
+                needs_user_input = True
+                continue
 
             elif tool_name == "execute_ipython":
                 script_to_run = tool_args.get("ipython_script", "")
