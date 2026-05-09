@@ -27,7 +27,6 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "instructor~=1.14.5",
     "litellm~=1.81.13",
     "pydantic~=2.12.5",
     "pydantic-pick~=0.2.0",

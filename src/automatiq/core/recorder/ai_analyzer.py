@@ -1,10 +1,10 @@
 import base64
+import json
 import logging
 import os
 import subprocess
 
 import imageio_ffmpeg
-import instructor
 import litellm
 from pydantic import BaseModel, Field
 
@@ -31,7 +31,7 @@ class VideoActionAnalysis(BaseModel):
 
 
 class VideoActionAnalyzer:
-    """Extracts frames from video clips and analyzes them using Instructor for structured JSON output."""
+    """Extracts frames from video clips and analyzes them using Vision AI for structured JSON output."""
 
     SUBPROCESS_TIMEOUT = 60  # seconds — guard against hanging ffmpeg
 
@@ -42,14 +42,7 @@ class VideoActionAnalyzer:
         self.model = config.RECORDER_AI_MODEL
         self.max_frames = config.MAX_FRAMES_PER_PROMPT
         self.history: list[str] = []
-        self._ai_disabled: bool = False  # set True after first fatal LLM error
-
-        try:
-            self.client = instructor.from_litellm(litellm.completion, mode=instructor.Mode.MD_JSON)
-        except Exception as exc:
-            logger.error(f"Failed to initialise instructor/litellm client: {exc}")
-            logger.exception("Exception occurred")
-            raise
+        self._ai_disabled: bool = False
 
     def _get_base64_frames(self, video_path: str, duration_sec: float, cancel_check=None) -> list[str]:
         """Extracts evenly spaced frames using lightweight native FFmpeg.
@@ -114,21 +107,9 @@ class VideoActionAnalyzer:
 
     @staticmethod
     def _extract_root_cause(exc: Exception) -> str:
-        """Pull a human-readable one-liner from an instructor/litellm exception."""
-        # instructor wraps retries in InstructorRetryException whose __cause__
-        # or last_exception holds the real error.
+        """Pull a human-readable one-liner from an exception."""
         cause = getattr(exc, "__cause__", None) or exc
         msg = str(cause)
-        # Strip long XML <failed_attempts> blocks instructor injects
-        if "<failed_attempts>" in msg:
-            msg = msg.split("<failed_attempts>")[0].strip()
-        if "<last_exception>" in msg:
-            # grab only the content between the tags
-            import re
-
-            m = re.search(r"<last_exception>\s*(.+?)\s*</last_exception>", msg, re.S)
-            if m:
-                msg = m.group(1).strip()
         # Keep it to one line
         msg = msg.replace("\n", " ").strip()
         return msg if msg else str(exc)[:200]
@@ -146,7 +127,7 @@ class VideoActionAnalyzer:
     def analyze_clip(
         self, video_path: str, duration_sec: float, raw_actions: list[dict] | None = None, cancel_check=None
     ) -> dict:
-        """Analyzes the clip and guarantees a structured response using Instructor.
+        """Analyzes the clip and guarantees a structured response.
 
         *cancel_check*, when provided, is a callable returning True when the
         user has requested cancellation (e.g. pressed Esc).  It is forwarded to
@@ -187,20 +168,36 @@ class VideoActionAnalyzer:
         for b64 in base64_frames:
             content.append({"type": "image_url", "image_url": {"url": b64}})
 
-        logger.info(f"Prompting Instructor Vision AI with {len(base64_frames)} frames...")
+        logger.info(f"Prompting Vision AI with {len(base64_frames)} frames...")
 
         try:
+            schema_json = json.dumps(VideoActionAnalysis.model_json_schema())
+            content[0]["text"] += (
+                "\n\nIMPORTANT: You must respond in pure JSON format. "
+                f"The JSON must exactly match this schema: {schema_json}"
+            )
+
             kwargs = dict(
                 model=self.model,
-                response_model=VideoActionAnalysis,
-                max_retries=2,
                 messages=[{"role": "user", "content": content}],
                 max_tokens=500,
+                response_format={"type": "json_object"},
             )
             if config.API_BASE:
                 kwargs["api_base"] = config.API_BASE
 
-            analysis: VideoActionAnalysis = self.client.chat.completions.create(**kwargs)
+            response = litellm.completion(**kwargs)
+            raw_text = response.choices[0].message.content.strip()
+
+            if raw_text.startswith("```"):
+                lines = raw_text.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                raw_text = "\n".join(lines).strip()
+
+            analysis = VideoActionAnalysis.model_validate_json(raw_text)
 
             self.history.append(analysis.macro_summary)
             return analysis.model_dump()

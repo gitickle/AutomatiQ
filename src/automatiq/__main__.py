@@ -21,7 +21,7 @@ from .cli.console import error, info, rule
 #
 # We peek at sys.argv before argparse runs so we can preload only what the
 # chosen sub-command actually needs:
-#   agent          → litellm, instructor, IPython, yaml
+#   agent          → litellm, IPython, yaml
 #   record / run   → zendriver, mss, numpy, imageio_ffmpeg  (+ agent deps for run)
 # ---------------------------------------------------------------------------
 
@@ -111,7 +111,6 @@ def _preload():
         init_file_logger(str(config.LOGS_DIR))
 
         if cmd in ("agent", "run", ""):
-            import instructor  # noqa: F401
             import IPython  # noqa: F401
             import litellm  # noqa: F401
             import yaml  # noqa: F401

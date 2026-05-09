@@ -5,7 +5,6 @@ import pytest
 from automatiq.core import events
 from automatiq.core.cancel_standard import CancelToken
 from automatiq.core.main import run_agent
-from automatiq.core.schema import AssistantResponse, Message, PythonScript, ToolEnum
 
 
 @pytest.fixture
@@ -33,11 +32,9 @@ def mock_sandbox(mocker):
 
 
 @pytest.fixture
-def mock_instructor_client(mocker):
-    client_mock = mocker.patch("automatiq.core.main.instructor.from_litellm")
-    mock_instance = mocker.MagicMock()
-    client_mock.return_value = mock_instance
-    return mock_instance
+def mock_litellm_client(mocker):
+    client_mock = mocker.patch("automatiq.core.main.litellm.completion")
+    return client_mock
 
 
 def test_agent_startup_and_missing_session(mock_config_workspace, mocker):
@@ -52,7 +49,7 @@ def test_agent_startup_and_missing_session(mock_config_workspace, mocker):
     assert "No recorded session found" in log_error_mock.call_args[1]["text"]
 
 
-def test_agent_user_exit(session_dump_dir, mock_sandbox, mock_instructor_client, mocker):
+def test_agent_user_exit(session_dump_dir, mock_sandbox, mock_litellm_client, mocker):
     """Verify that providing 'q' cleanly exits the agent."""
     log_info_mock = mocker.patch.object(events.log_info, "send")
 
@@ -65,7 +62,7 @@ def test_agent_user_exit(session_dump_dir, mock_sandbox, mock_instructor_client,
     log_info_mock.assert_any_call("core", text="User requested exit.")
 
 
-def test_agent_cancellation_during_llm(session_dump_dir, mock_sandbox, mock_instructor_client, mocker):
+def test_agent_cancellation_during_llm(session_dump_dir, mock_sandbox, mock_litellm_client, mocker):
     """Verify that a cancel token interrupting the LLM cleanly returns to prompt."""
     operation_cancelled_mock = mocker.patch.object(events.operation_cancelled, "send")
 
@@ -81,14 +78,14 @@ def test_agent_cancellation_during_llm(session_dump_dir, mock_sandbox, mock_inst
 
         raise CancelRequestedException("Interrupted by mock cancel token")
 
-    mock_instructor_client.chat.completions.create_with_completion.side_effect = mock_llm_call
+    mock_litellm_client.side_effect = mock_llm_call
 
     run_agent(input_queue=input_q, cancel_token=cancel_token)
 
     operation_cancelled_mock.assert_called_once_with("core")
 
 
-def test_agent_tool_dispatch_message(session_dump_dir, mock_sandbox, mock_instructor_client, mocker):
+def test_agent_tool_dispatch_message(session_dump_dir, mock_sandbox, mock_litellm_client, mocker):
     """Verify that the message_to_user tool correctly triggers UI events."""
     tool_message_mock = mocker.patch.object(events.tool_message, "send")
 
@@ -96,16 +93,22 @@ def test_agent_tool_dispatch_message(session_dump_dir, mock_sandbox, mock_instru
     input_q.put("")
     input_q.put("q")
 
-    mock_raw_response = mocker.MagicMock()
-    mock_raw_response.usage.prompt_tokens = 100
+    mock_response = mocker.MagicMock()
+    mock_response.usage.prompt_tokens = 100
+    mock_response.choices = [mocker.MagicMock()]
+    mock_response.choices[0].message.tool_calls = [mocker.MagicMock()]
+    mock_response.choices[0].message.tool_calls[0].function.name = "final_submit"
+    mock_response.choices[0].message.content = "I will tell the user something because I have finished investigating."
+    import json
 
-    mock_response = AssistantResponse(
-        thought_process="I will tell the user something because I have finished investigating.",
-        tool=ToolEnum.message_to_user,
-        tool_content=Message(message_to_user="Hello user", does_it_contain_the_final_script=False),
+    mock_response.choices[0].message.tool_calls[0].function.arguments = json.dumps(
+        {
+            "message_to_user": "Hello user",
+            "is_final_script": False,
+        }
     )
 
-    mock_instructor_client.chat.completions.create_with_completion.return_value = (mock_response, mock_raw_response)
+    mock_litellm_client.return_value = mock_response
 
     run_agent(input_queue=input_q)
 
@@ -113,7 +116,7 @@ def test_agent_tool_dispatch_message(session_dump_dir, mock_sandbox, mock_instru
     assert "Hello user" in tool_message_mock.call_args[1]["text"]
 
 
-def test_agent_tool_dispatch_execute(session_dump_dir, mock_sandbox, mock_instructor_client, mocker):
+def test_agent_tool_dispatch_execute(session_dump_dir, mock_sandbox, mock_litellm_client, mocker):
     """Verify that execute_ipython correctly interacts with the sandbox and triggers UI events."""
     code_exec_start_mock = mocker.patch.object(events.code_exec_start, "send")
     code_exec_output_mock = mocker.patch.object(events.code_exec_output, "send")
@@ -122,23 +125,36 @@ def test_agent_tool_dispatch_execute(session_dump_dir, mock_sandbox, mock_instru
     input_q.put("")
     input_q.put("q")
 
-    mock_raw_response = mocker.MagicMock()
-    mock_raw_response.usage.prompt_tokens = 100
+    mock_response_1 = mocker.MagicMock()
+    mock_response_1.usage.prompt_tokens = 100
+    mock_response_1.choices = [mocker.MagicMock()]
+    mock_response_1.choices[0].message.tool_calls = [mocker.MagicMock()]
+    mock_response_1.choices[0].message.tool_calls[0].function.name = "execute_ipython"
+    mock_response_1.choices[0].message.content = "I will run some code to check the current state of the document."
+    import json
 
-    resp_exec = AssistantResponse(
-        thought_process="I will run some code to check the current state of the document.",
-        tool=ToolEnum.execute_ipython,
-        tool_content=PythonScript(ipython_script="print('hi')"),
-    )
-    resp_msg = AssistantResponse(
-        thought_process="I am done with the execution and will now talk to the user.",
-        tool=ToolEnum.message_to_user,
-        tool_content=Message(message_to_user="Done", does_it_contain_the_final_script=False),
+    mock_response_1.choices[0].message.tool_calls[0].function.arguments = json.dumps(
+        {
+            "ipython_script": "print('hi')",
+        }
     )
 
-    mock_instructor_client.chat.completions.create_with_completion.side_effect = [
-        (resp_exec, mock_raw_response),
-        (resp_msg, mock_raw_response),
+    mock_response_2 = mocker.MagicMock()
+    mock_response_2.usage.prompt_tokens = 100
+    mock_response_2.choices = [mocker.MagicMock()]
+    mock_response_2.choices[0].message.tool_calls = [mocker.MagicMock()]
+    mock_response_2.choices[0].message.tool_calls[0].function.name = "final_submit"
+    mock_response_2.choices[0].message.content = "I am done with the execution and will now talk to the user."
+    mock_response_2.choices[0].message.tool_calls[0].function.arguments = json.dumps(
+        {
+            "message_to_user": "Done",
+            "is_final_script": False,
+        }
+    )
+
+    mock_litellm_client.side_effect = [
+        mock_response_1,
+        mock_response_2,
     ]
 
     run_agent(input_queue=input_q)

@@ -1,5 +1,5 @@
 """Agent loop — the core interactive session where the LLM investigates a
-recorded browser session and produces a standalone automation/extraction script."""
+recorded browser session and produces a standalone automation/extraction script."""  # noqa: E501
 
 import json
 import logging
@@ -9,10 +9,8 @@ import sys
 import threading
 import time
 
-import instructor
 import litellm
 import yaml
-from instructor.core import InstructorRetryException
 from litellm.exceptions import (
     APIConnectionError,
     APIError,
@@ -24,22 +22,206 @@ from litellm.exceptions import (
 from . import config, events
 from .cancel_standard import CancelRequestedException, CancelToken
 from .ipython_sandbox import AgentSandbox
-from .prompt import PromptFactory
-from .schema import (
-    AgentStep,
-    AssistantResponse,
-    Input,
-    ModeEnum,
-    ModeNotification,
-    ToolEnum,
-    ToolResponse,
-    UserMessage,
-)
 
 logger = logging.getLogger(__name__)
 litellm.suppress_debug_info = True
 
 _preloaded_sandbox = None
+
+# -----------------
+# CONSTANTS / PROMPTS
+# -----------------
+
+SYSTEM_PROMPT = """\
+You are a Web Automation Investigator. You reverse-engineer recorded browser sessions into standalone Python automation/extraction scripts. You work inside a persistent IPython environment.
+
+<environment>
+## Tools
+You have three actions each turn:
+1. **`execute_ipython`** — Run Python code or shell commands (`!command`) in a persistent IPython session. State persists across cells.
+2. **`message_to_user`** — Talk to the user. Set `is_final_script=True` ONLY when delivering the final script.
+3. **`switch_mode`** — Switch your working mode. You have three modes: `reading`, `testing`, `building`. When you switch, write a research memo summarizing what you've learned so far — it will be your own context when you resume in the new mode.
+
+## Shell Commands
+Via `!command`: `rg` (ripgrep), `jq`, `grep`, `ls`, `cat`, `head`, `tail`, `sort`, `uniq`, `wc`, `awk`, `tr`, `base64`, `tee`, `cp`, `mv`, `mkdir`.
+Use shell one-liners for fast searching across the dump. Use Python for parsing, HTTP requests, and the final script.
+
+## Output Constraints
+Output is capped at ~20KB. If truncated, use `%view_output Cell_N --offset M` to paginate. **Never draw conclusions from truncated output.** Always read the rest first.
+
+## Session Dump Structure
+```
+session_dump/
+├── SUMMARY.json              # session metadata, session_flow (AI chronological summary), statistics
+├── session_metadata.json     # raw session metadata (start URL, timestamps, browser info)
+├── timeline.json             # time-sorted interleaved user actions + network requests
+├── clips/                    # video segments of user actions
+│   └── action_clip_000.mp4   # one clip per action cluster (padded around the action)
+└── requests/                 # one folder per HTTP transaction
+    └── 000_GET_example.com/
+        ├── transaction.json  # full request/response metadata, cookies, headers, content detection
+        ├── req_payload.*     # request body (extension from Magika AI detection: .json, .txt, .js, etc.)
+        └── res_body.*        # response body (extension from Magika AI detection)
+```
+- `SUMMARY.json` contains: `session` (metadata), `session_flow` (chronological AI-generated summaries of user actions with timestamps), `statistics` (total_requests, total_actions, methods breakdown, domains breakdown, status_codes, with_auth, with_cookies, content_detection stats).
+- `timeline.json` interleaves two event types:
+  - `user_action`: action type (click, input, keypress, page_changed), details, plus AI annotations from video analysis — `ai_macro_summary`, `ai_elements_interacted`, `ai_action_success`, `ai_video_file`, `video_start_sec`, `video_end_sec`.
+  - `network_request`: method, url, status, and `folder` pointing to the request's directory in `requests/`.
+  Use timestamps to correlate user actions with the network requests they triggered.
+- `transaction.json` contains: `metadata` (method, url, status, timing with unix timestamps and duration_ms, security flags for authorization/challenge headers), `request` (headers, cookies_sent, content_detection from Magika, has_payload), `response` (headers, cookies_set, content_detection, has_body, mime_mismatch flag).
+</environment>
+
+<approach>
+You work like a scientist. You observe, form beliefs, test them, and update your understanding based on what actually happens. You are honest about what you know vs. what you're guessing.
+
+- **Be curious.** When you see output, actually read it. When it's truncated, paginate. When something looks interesting, dig deeper.
+- **Be skeptical.** When you think you know something, test that specific belief before building on it. One cell, one question.
+- **Be honest.** When you're guessing, know you're guessing. When something looks wrong, stop and investigate instead of moving on.
+- **Be incremental.** Don't write 50 lines when 3 lines would answer your current question. Small experiments, clear results.
+- **Know when to shift gears.** If you've been reading for a while and have beliefs worth testing, switch to testing mode. If tests keep failing, go back to reading. If everything's verified, start building.
+
+## Working Modes
+
+You operate in one of three modes. Each mode is a different lens on the same problem — not a rigid phase. You can switch at any time using `switch_mode`. When you switch, write a research memo capturing what you know, what's uncertain, and what to look at next. That memo is for yourself — the next mode will read it.
+
+### Reading Mode
+You're exploring the session dump. Reading files, grepping, following threads, building understanding. You haven't formed strong enough beliefs to test yet, or a test failed and you need to go back and look more carefully.
+
+### Testing Mode
+You have specific beliefs and you're verifying them against the live site. One hypothesis per cell. You're not writing the final script — you're running small experiments to confirm or refute what you think you know.
+
+### Building Mode
+You have enough verified pieces to assemble the final script. You're composing, running end-to-end, and checking that the output makes sense. If something breaks, figure out which piece failed and go back to testing that piece.
+
+## Script Principles
+- Use `requests.Session()` by default. Use `curl_cffi` with `impersonate="chromeXXX"` if you hit TLS fingerprinting (empty responses, 403s, challenge pages).
+- Never hardcode ephemeral values (tokens, session IDs). Always extract them dynamically.
+- If you don't know where a value comes from, go back to the dump.
+- Only deliver the script after you've seen it produce correct output.
+</approach>
+
+<critical_rules>
+1. **Truth above all.** Never lie to yourself. If something isn't working, admit it. If you're confused, admit it. If your output looks wrong, don't pretend it's right. If you're guessing, say so. Every other rule here is optional. This one is not.
+2. **When lost, go back to reading mode.** It is fine to get confused. It is fine to get stuck. Whenever things aren't making sense — a response doesn't match expectations, a parse returns garbage, you're not sure what to try next — switch back to reading mode and look at the dump with fresh eyes. In very rare cases, if something is genuinely impossible, tell the user honestly. But exhaust your curiosity first.
+3. **ALWAYS start by reading SUMMARY.json and timeline.json.** Before doing anything else — before writing any code, asking questions, or forming hypotheses — read the full SUMMARY.json (especially the `session_flow` section, which is a chronological AI-generated summary of every action the user performed) and the full timeline.json. Paginate if truncated. Do NOT skip this step.
+4. **NEVER write code that hits the live site until you understand what you're trying to reproduce.** You should be able to explain what request you're about to make and why before you make it.
+5. **Always write out your reasoning in the main message body before making a tool call.** Explain what you just observed, what you now believe, what you are about to do and why. Do NOT leave the message body empty.
+</critical_rules>
+"""  # noqa: E501
+
+MODE_INJECTIONS = {
+    "reading": (
+        "You are now in **reading mode**. "
+        "Build your understanding of what happened in the recorded session. "
+        "Explore the session dump. Read files, grep, follow values(tokens, keys, cookies) that "
+        "help to recreate the goal request. "
+        "When you have specific beliefs worth testing against the live site, "
+        "switch to testing mode and write down what you've learned."
+        "In reading mode, your aim is not only to extract info from the session_dump,"
+        "But as well as from the user. You need to ask objective, "
+        "quantitative and qualitative questions as well. so clarify what user wants by asking"
+    ),
+    "testing": (
+        "You are now in testing mode. "
+        "Verify your assumptions against the live site, one at a time, one cell, one question. "
+        "If something does not match your expectations, investigate it or return to reading mode to dig deeper. "
+        "Crazy out-of-box thinking when debugging, try to follow your hunch and"
+        " exhaust your own hypotheses before attempting to give up. "
+        "Always try not to hardcode temporary values(cookies, tokens) in your script. Instead go back to reading mode,"
+        " to figure out how they are created or extracted"
+        "If you cannot figure out what is going wrong, return to reading mode. "
+        "Once you have enough verified pieces, switch to building mode."
+    ),
+    "building": (
+        "You are now in building mode. "
+        "Assemble your verified pieces into the final script and run it end-to-end. "
+        "Validate that it runs correctly and that the output makes sense. "
+        "Do not accept hardcoded values, headers, or tokens. "
+        "Everything must be dynamically bootstrapped before the target request is made. "
+        "If any hardcoded information is found, return to reading mode to figure out how to derive those values "
+        "If anything fails, identify the broken piece and return to testing mode for that piece only."
+    ),
+}
+
+AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_ipython",
+            "description": "Execute a python or ipython script in the sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ipython_script": {
+                        "type": "string",
+                        "description": (
+                            "A single IPython cell to execute. Supports standard Python plus IPython features: "
+                            "magic commands (%cd, %timeit, %%timeit, %run, %store, %macro, %edit, %prun), "
+                            "shell access via ! prefix (!ls, var = !cmd), "
+                            "dynamic introspection (obj?, obj??), "
+                            "namespace search with wildcards (%psearch, *pattern*), "
+                            "auto-parentheses (%autocall: sin 3 -> sin(3)), "
+                            "$ variable expansion in shell commands (!echo $myvar), "
+                            "and custom sandbox commands: "
+                            "%reset (wipe all variables, imports, and history — fresh kernel), "
+                            "%restore (re-run all previously successful cells to recover state after a crash or reset), "
+                            "%view_output Cell_N [--offset Y] (page through long output of a past cell). "
+                            "Code must be syntactically complete — no dangling blocks or unclosed brackets."
+                        ),
+                    },
+                },
+                "required": ["ipython_script"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "switch_mode",
+            "description": "Switch the agent's current mode (reading, testing, building).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_mode": {
+                        "type": "string",
+                        "enum": ["reading", "testing", "building"],
+                        "description": "The mode you want to switch to.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": (
+                            "A research memo for yourself in the next mode. Write down what "
+                            "you were investigating, observed, confident about, etc."
+                        ),
+                    },
+                },
+                "required": ["target_mode", "context"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "final_submit",
+            "description": "Deliver a message to the user, and optionally submit the final script.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_to_user": {"type": "string", "description": "The message to display to the user."},
+                    "is_final_script": {
+                        "type": "boolean",
+                        "description": "Set to True ONLY when this message contains the final deliverable script.",
+                    },
+                },
+                "required": ["message_to_user", "is_final_script"],
+            },
+        },
+    },
+]
+
+# -----------------
+# LIFECYCLE & HELPERS
+# -----------------
 
 
 @events.preload_start.connect
@@ -83,6 +265,39 @@ def run_cancellable(token: CancelToken, fn, *args, **kwargs):
     return result_box[0]
 
 
+def compress_history(messages: list[dict], cutoff_turn=20) -> list[dict]:
+    """Truncates massive tool outputs from older messages to save tokens."""
+    if len(messages) <= cutoff_turn:
+        return messages
+
+    compressed = []
+    # System prompt is index 0
+    # Everything before (len(messages) - cutoff_turn) gets compressed if it's a huge tool output
+    threshold_idx = len(messages) - cutoff_turn
+
+    for i, msg in enumerate(messages):
+        if i < threshold_idx and msg.get("role") == "tool":
+            content_str = str(msg.get("content", ""))
+            # If the tool output is large, truncate it to save context window
+            if len(content_str) > 1000:
+                compressed.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": msg.get("tool_call_id"),
+                        "name": msg.get("name"),
+                        "content": "<Truncated older tool output to save tokens>",
+                    }
+                )
+                continue
+        compressed.append(msg)
+    return compressed
+
+
+# -----------------
+# AGENT LOOP
+# -----------------
+
+
 def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None):
     events.agent_start.send("core")
     """Interactive agent loop. Reads from the workspace produced by the recorder."""
@@ -99,7 +314,6 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
         sys.exit(1)
     workspace = str(workspace_dir)
     os.makedirs(workspace, exist_ok=True)
-    client = instructor.from_litellm(litellm.completion, mode=instructor.Mode.MD_JSON)
 
     global _preloaded_sandbox
     if _preloaded_sandbox is not None:
@@ -111,17 +325,14 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
             timeout_seconds=config.SANDBOX_TIMEOUT_SECONDS,
             bin_path=str(config.BIN_DIR),
         )
-    global_memory = []
-    agent = PromptFactory.create_agent("main", shared_memory=global_memory)
-    reading_injection = agent.mode_injections.get(ModeEnum.reading, "")
-    agent.add_step(
-        AgentStep(
-            role="user",
-            content=Input(
-                input=ModeNotification(mode_switched=f"{reading_injection}\n\nSession started. You are in reading mode.")
-            ),
-        )
-    )
+
+    # Initial state
+    current_mode = "reading"
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"{MODE_INJECTIONS['reading']}\n\nSession started. You are in reading mode."},
+    ]
+
     needs_user_input = True
     awaiting_tool_complete = False
     awaiting_mode_switch = False
@@ -129,7 +340,7 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
     mode_switch_notification = ""
     final_script_bounces = 0
     MAX_FINAL_SCRIPT_BOUNCES = 1
-    _first_prompt = True
+
     exec_history: list[tuple[str, str, int]] = []
     consecutive_execs = 0
     cell_counter = 0
@@ -161,25 +372,21 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                     pass
             return s.split("\n")[0][:300]
 
-        if isinstance(exc, InstructorRetryException):
-            for fa in exc.failed_attempts or []:
-                if fa.exception:
-                    return _clean(fa.exception)
         return _clean(exc)
 
-    def _call_llm(messages):
+    def _call_llm(msgs):
         """Blocking LLM call — runs inside the interruptible wrapper."""
         kwargs = dict(
             model=config.AGENT_MODEL,
-            response_model=AssistantResponse,
-            messages=messages,
-            max_retries=3,
+            messages=msgs,
+            tools=AGENT_TOOLS,
+            tool_choice="required",
             temperature=0.3,
             timeout=30,
         )
         if config.API_BASE:
             kwargs["api_base"] = config.API_BASE
-        return client.chat.completions.create_with_completion(**kwargs)
+        return litellm.completion(**kwargs)
 
     try:
         for step in range(config.MAX_AGENT_STEPS):
@@ -187,36 +394,25 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                 cr = sandbox._cancel_result
                 sandbox._cancel_result = None
                 if cr == "lost":
-                    agent.add_step(
-                        AgentStep(
-                            role="user",
-                            content=Input(
-                                input=ToolResponse(
-                                    tool_response=(
-                                        "SYSTEM: Execution cancelled by user — process was force-killed. "
-                                        "State lost. Run %restore to recover previous variables."
-                                    )
-                                )
-                            ),
-                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "SYSTEM: Execution cancelled by user — process was force-killed. State lost. "
+                            "Run %restore to recover previous variables.",
+                        }
                     )
                 elif cr == "preserved":
-                    agent.add_step(
-                        AgentStep(
-                            role="user",
-                            content=Input(
-                                input=ToolResponse(
-                                    tool_response=(
-                                        "SYSTEM: Execution interrupted by user. State preserved — variables are intact."
-                                    )
-                                )
-                            ),
-                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "SYSTEM: Execution interrupted by user. State preserved — variables are intact.",
+                        }
                     )
                 awaiting_tool_complete = False
                 awaiting_mode_switch = False
                 needs_user_input = True
                 continue
+
             if needs_user_input:
                 events.prompt_request_start.send("core")
                 if input_queue is not None:
@@ -230,38 +426,28 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                 if ip.strip().lower() == "q":
                     events.log_info.send("core", text="User requested exit.")
                     break
-                agent.add_step(
-                    AgentStep(
-                        role="user",
-                        content=Input(input=UserMessage(message_from_user=ip)),
-                    )
-                )
+                messages.append({"role": "user", "content": ip})
                 needs_user_input = False
                 consecutive_execs = 0
+
             elif awaiting_tool_complete:
-                agent.add_step(
-                    AgentStep(
-                        role="user",
-                        content=Input(input=ToolResponse(tool_response=f"<terminal_output>\n{scr}\n</terminal_output>")),
-                    )
-                )
+                # Handled via tool loop logic
                 awaiting_tool_complete = False
+
             elif awaiting_mode_switch:
-                agent.add_step(
-                    AgentStep(
-                        role="user",
-                        content=Input(input=ModeNotification(mode_switched=mode_switch_notification)),
-                    )
-                )
+                messages.append({"role": "user", "content": mode_switch_notification})
                 awaiting_mode_switch = False
-            compiled_messages = agent.compile()
+
+            # Compress history to save tokens
+            compiled_messages = compress_history(messages, cutoff_turn=20)
+
             resp = None
             aborted = False
             for attempt in range(1, MAX_LLM_RETRIES + 1):
                 try:
                     events.llm_request_start.send("core")
                     try:
-                        resp, raw_response = run_cancellable(cancel_token, _call_llm, compiled_messages)
+                        resp = run_cancellable(cancel_token, _call_llm, compiled_messages)
                     finally:
                         events.llm_request_end.send("core")
                     break
@@ -271,7 +457,6 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                     aborted = True
                     break
                 except (
-                    InstructorRetryException,
                     RateLimitError,
                     ServiceUnavailableError,
                     APIConnectionError,
@@ -302,111 +487,147 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                         events.log_error.send("core", text="Max retries exceeded. Returning to prompt.")
                         aborted = True
                         break
+
             if aborted or resp is None:
                 needs_user_input = True
                 awaiting_tool_complete = False
                 awaiting_mode_switch = False
                 continue
-            events.step_start.send("core", step=step, prompt_tokens=raw_response.usage.prompt_tokens)
-            current_thought = resp.thought_process
+
+            msg_obj = resp.choices[0].message
+            tool_calls = msg_obj.tool_calls
+            if not tool_calls:
+                messages.append({"role": "assistant", "content": msg_obj.content or ""})
+                if msg_obj.content:
+                    events.agent_thought.send("core", text=msg_obj.content)
+                needs_user_input = True
+                continue
+
+            tool_call = tool_calls[0]
+            tool_name = tool_call.function.name
+            try:
+                tool_args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            events.step_start.send("core", step=step, prompt_tokens=resp.usage.prompt_tokens)
+
+            # The LLM's thought process is now in the normal content field
+            current_thought = msg_obj.content or ""
+
             if current_thought == prev_thought and current_thought:
-                events.log_warn.send("core", text="Exact duplicate thought_process detected.")
-                agent.add_step(AgentStep(role="assistant", content=resp))
-                agent.add_step(
-                    AgentStep(
-                        role="user",
-                        content=Input(
-                            input=ToolResponse(
-                                tool_response=(
-                                    "SYSTEM: Your reasoning is identical to the previous turn — "
-                                    "word for word. You are looping. Either:\n"
-                                    "1. Switch to a different mode for a fresh perspective, or\n"
-                                    "2. Tell the user what you've found so far and ask for guidance.\n"
-                                    "Do NOT repeat the same action."
-                                )
-                            )
+                events.log_warn.send("core", text="Exact duplicate message body detected.")
+                messages.append(msg_obj.model_dump(exclude_none=True))
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
+                        "content": (
+                            "SYSTEM: Your reasoning is identical to the previous turn — "
+                            "word for word. You are looping. Either:\n"
+                            "1. Switch to a different mode for a fresh perspective, or\n"
+                            "2. Tell the user what you've found so far and ask for guidance.\n"
+                            "Do NOT repeat the same action."
                         ),
-                    )
+                    }
                 )
                 continue
+
             prev_thought = current_thought
-            agent.add_step(AgentStep(role="assistant", content=resp))
-            events.agent_thought.send("core", text=resp.thought_process)
-            if resp.tool == ToolEnum.message_to_user:
-                if resp.tool_content.does_it_contain_the_final_script and agent.current_mode != ModeEnum.building:
+
+            # Append the LLM's assistant message (contains BOTH text and tool_calls)
+            messages.append(msg_obj.model_dump(exclude_none=True))
+            if current_thought:
+                events.agent_thought.send("core", text=current_thought)
+
+            # Process the specific tool
+            if tool_name == "final_submit":
+                is_final = tool_args.get("is_final_script", False)
+                message_text = tool_args.get("message_to_user", "")
+
+                if is_final and current_mode != "building":
                     events.log_warn.send("core", text="Final script submitted outside building mode — bouncing back.")
-                    agent.add_step(
-                        AgentStep(
-                            role="user",
-                            content=Input(
-                                input=ToolResponse(
-                                    tool_response=(
-                                        "Hey, it seems you are trying to finish the script while not in building mode. "
-                                        "If stuck, or the output isn't working, switch to reading or testing mode "
-                                        "as you wish. We have only one True RULE: Truth and truth alone."
-                                    )
-                                )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_name,
+                            "content": (
+                                "Hey, it seems you are trying to finish the script while not in building mode. "
+                                "If stuck, or the output isn't working, switch to reading or testing mode "
+                                "as you wish. We have only one True RULE: Truth and truth alone."
                             ),
-                        )
+                        }
                     )
                     continue
-                if resp.tool_content.does_it_contain_the_final_script:
+
+                if is_final:
                     final_script_bounces += 1
                     if final_script_bounces <= MAX_FINAL_SCRIPT_BOUNCES:
-                        agent.add_step(
-                            AgentStep(
-                                role="user",
-                                content=Input(
-                                    input=ToolResponse(
-                                        tool_response=(
-                                            "Hi there, looks like you have created the final script. "
-                                            "I just came here to verify if you have actually tested it or not. "
-                                            "In case the script isn't running, don't worry, just go back to "
-                                            "reading mode or testing mode. They will take care of the validity. "
-                                            "If test and read modes actually say they can't find any way "
-                                            "to make this work, then you can yield before the user that you "
-                                            "can't find any solution. If you are truly confident, I want you to show me "
-                                            "the output of the script you are trying to submit to user."
-                                        )
-                                    )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": (
+                                    "Hi there, looks like you have created the final script. "
+                                    "I just came here to verify if you have actually tested it or not. "
+                                    "In case the script isn't running, don't worry, just go back to "
+                                    "reading mode or testing mode. They will take care of the validity. "
+                                    "If test and read modes actually say they can't find any way "
+                                    "to make this work, then you can yield before the user that you "
+                                    "can't find any solution. If you are truly confident, I want you to show me "
+                                    "the output of the script you are trying to submit to user."
                                 ),
-                            )
+                            }
                         )
                         continue
                     final_script_bounces = 0
-                events.tool_message.send("core", text=f"\n{resp.tool_content.message_to_user}\n")
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
+                        "content": "Message delivered to user.",
+                    }
+                )
+                events.tool_message.send("core", text=f"\n{message_text}\n")
                 needs_user_input = True
-            elif resp.tool == ToolEnum.execute_ipython:
-                script_to_run = resp.tool_content.ipython_script
+
+            elif tool_name == "execute_ipython":
+                script_to_run = tool_args.get("ipython_script", "")
                 consecutive_execs += 1
                 cell_counter += 1
                 current_cell = cell_counter
                 repeat_count = 0
                 matched_cell = None
+
                 for prev_script, _prev_output, prev_cell in exec_history:
                     if script_to_run.strip() == prev_script:
                         repeat_count += 1
                         matched_cell = prev_cell
+
                 if repeat_count >= 2 and matched_cell is not None:
                     events.log_warn.send(
                         "core", text=f"Blocked: script ran {repeat_count}x (last: Cell_{matched_cell})."
                     )
-                    agent.add_step(
-                        AgentStep(
-                            role="user",
-                            content=Input(
-                                input=ToolResponse(
-                                    tool_response=(
-                                        f"SYSTEM: This exact script has already been executed {repeat_count} times "
-                                        f"with the same output. It was NOT executed again. "
-                                        f"Use %view_output Cell_{matched_cell} to review the previous output. "
-                                        f"Try a fundamentally different approach."
-                                    )
-                                )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_name,
+                            "content": (
+                                f"SYSTEM: This exact script has already been executed {repeat_count} times "
+                                f"with the same output. It was NOT executed again. "
+                                f"Use %view_output Cell_{matched_cell} to review the previous output. "
+                                f"Try a fundamentally different approach."
                             ),
-                        )
+                        }
                     )
                     continue
+
                 events.code_exec_start.send("core", script=script_to_run)
                 try:
                     events.code_exec_start.send("core")
@@ -418,13 +639,23 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                     sandbox.cancel()
                     events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
                     events.operation_cancelled.send("core")
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_name,
+                            "content": "SYSTEM: Execution cancelled by user.",
+                        }
+                    )
                     needs_user_input = True
                     continue
+
                 output_match_cell = None
                 for _prev_script, prev_output, prev_cell in exec_history:
                     if prev_output and scr == prev_output and len(scr) > 100:
                         output_match_cell = prev_cell
                         break
+
                 if output_match_cell is not None:
                     scr = (
                         f"The output is the same as Cell_{output_match_cell}. "
@@ -432,63 +663,70 @@ def run_agent(input_queue: queue.Queue = None, cancel_token: CancelToken = None)
                     )
                 exec_history.append((script_to_run.strip(), scr, current_cell))
                 events.code_exec_output.send("core", output=scr)
-                awaiting_tool_complete = True
+
+                tool_response_content = f"<terminal_output>\n{scr}\n</terminal_output>"
+
                 if consecutive_execs >= MAX_CONSECUTIVE_EXECS:
-                    agent.add_step(
-                        AgentStep(
-                            role="user",
-                            content=Input(
-                                input=ToolResponse(tool_response=f"<terminal_output>\n{scr}\n</terminal_output>")
-                            ),
-                        )
+                    tool_response_content += (
+                        f"\nSYSTEM: You have been running code for {consecutive_execs} consecutive turns "
+                        f"without switching modes or talking to the user. "
+                        f"Take a step back and evaluate your progress:\n"
+                        f"- Are you making forward progress or going in circles?\n"
+                        f"- Would switching to a different mode help?\n"
+                        f"- Is there something you should ask the user about?\n"
+                        f"If you are stuck, switch modes. "
+                        f"If you have findings, share them with the user."
                     )
-                    agent.add_step(
-                        AgentStep(
-                            role="user",
-                            content=Input(
-                                input=ToolResponse(
-                                    tool_response=(
-                                        f"SYSTEM: You have been running code for {consecutive_execs} consecutive turns "
-                                        f"without switching modes or talking to the user. "
-                                        f"Take a step back and evaluate your progress:\n"
-                                        f"- Are you making forward progress or going in circles?\n"
-                                        f"- Would switching to a different mode help?\n"
-                                        f"- Is there something you should ask the user about?\n"
-                                        f"If you are stuck, switch modes. "
-                                        f"If you have findings, share them with the user."
-                                    )
-                                )
-                            ),
-                        )
-                    )
-                    awaiting_tool_complete = False
-                    continue
-            elif resp.tool == ToolEnum.switch_mode:
-                target_mode = resp.tool_content.target_mode
-                context_memo = resp.tool_content.context
+
+                messages.append(
+                    {"role": "tool", "tool_call_id": tool_call.id, "name": tool_name, "content": tool_response_content}
+                )
+
+                # Automatically proceed to next step (no user input needed) unless cancelled
+                awaiting_tool_complete = False
+
+            elif tool_name == "switch_mode":
+                target_mode = tool_args.get("target_mode", "reading")
+                if target_mode not in ["reading", "testing", "building"]:
+                    target_mode = "reading"
+
+                context_memo = tool_args.get("context", "")
                 consecutive_execs = 0
-                events.mode_switch.send("core", mode=target_mode.value)
-                agent.switch_mode(target_mode)
-                mode_injection = agent.mode_injections.get(target_mode, "")
+                events.mode_switch.send("core", mode=target_mode)
+
+                current_mode = target_mode
+                mode_injection = MODE_INJECTIONS.get(target_mode, "")
+
+                # Give the tool a success response, and queue up the next user message
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
+                        "content": "Mode switched successfully.",
+                    }
+                )
+
                 mode_switch_notification = (
                     f"{mode_injection}\n\n--- Research memo from previous mode ---\n{context_memo}"
                 )
                 awaiting_mode_switch = True
+
     except Exception as exc:
         events.log_error.send("core", text=f"Unexpected error: {exc}")
         logger.exception("Exception occurred")
         sandbox.cancel()
     finally:
         try:
-            _export_session_logs(global_memory, agent)
+            _export_session_logs(messages)
         except Exception as exc:
             events.log_error.send("core", text=f"Failed to save session logs: {exc}")
             logger.exception("Exception occurred")
         sandbox.close()
 
 
-def _export_session_logs(global_memory, agent):
-    """Write both uncompressed and compressed YAML session logs to output/history/."""
+def _export_session_logs(messages: list[dict]):
+    """Write session logs to output/history/."""
 
     class _SessionDumper(yaml.Dumper):
         pass
@@ -500,22 +738,17 @@ def _export_session_logs(global_memory, agent):
 
     _SessionDumper.add_representer(str, multiline_presenter)
     history_dir = str(config.HISTORY_DIR)
-    uncompressed_path = os.path.join(history_dir, "messages_uncompressed.yaml")
-    uncompressed_data = [s.model_dump(exclude_none=True) for s in global_memory]
+    os.makedirs(history_dir, exist_ok=True)
+
+    # Save the full trace
+    uncompressed_path = os.path.join(history_dir, "messages_full.yaml")
     with open(uncompressed_path, "w", encoding="utf-8") as f:
-        yaml.dump(uncompressed_data, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
+        yaml.dump(messages, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
     logger.info(f"Saved full session history to {uncompressed_path}")
-    compiled_messages = agent.compile()
-    compressed_data = []
-    for msg in compiled_messages:
-        if "content" in msg and isinstance(msg["content"], str):
-            try:
-                compressed_data.append({"role": msg["role"], "content": json.loads(msg["content"])})
-            except json.JSONDecodeError:
-                compressed_data.append(msg)
-        else:
-            compressed_data.append(msg)
+
+    # Save the compressed version exactly as the LLM saw it
+    compressed = compress_history(messages, cutoff_turn=20)
     compressed_path = os.path.join(history_dir, "messages_compressed.yaml")
     with open(compressed_path, "w", encoding="utf-8") as f:
-        yaml.dump(compressed_data, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
+        yaml.dump(compressed, f, Dumper=_SessionDumper, sort_keys=False, allow_unicode=True)
     logger.info(f"Saved compressed session history to {compressed_path}")
