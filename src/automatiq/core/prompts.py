@@ -39,7 +39,6 @@ Always read the rest first.
 ```
 session_dump/
 ├── SUMMARY.json              # session metadata, session_flow (AI chronological summary), statistics
-├── session_metadata.json     # raw session metadata (start URL, timestamps, browser info)
 ├── timeline.json             # time-sorted interleaved user actions + network requests
 ├── clips/                    # video segments of user actions
 │   └── action_clip_000.mp4   # one clip per action cluster (padded around the action)
