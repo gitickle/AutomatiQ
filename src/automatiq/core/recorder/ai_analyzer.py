@@ -186,21 +186,35 @@ class VideoActionAnalyzer:
             if config.API_BASE:
                 kwargs["api_base"] = config.API_BASE
 
-            response = litellm.completion(**kwargs)
-            raw_text = response.choices[0].message.content.strip()
+            for attempt in range(1, 4):  # Max 3 attempts
+                try:
+                    response = litellm.completion(**kwargs)
+                    raw_text = response.choices[0].message.content.strip()
 
-            if raw_text.startswith("```"):
-                lines = raw_text.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                raw_text = "\n".join(lines).strip()
+                    if raw_text.startswith("```"):
+                        lines = raw_text.splitlines()
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines and lines[-1].startswith("```"):
+                            lines = lines[:-1]
+                        raw_text = "\n".join(lines).strip()
 
-            analysis = VideoActionAnalysis.model_validate_json(raw_text)
+                    analysis = VideoActionAnalysis.model_validate_json(raw_text)
 
-            self.history.append(analysis.macro_summary)
-            return analysis.model_dump()
+                    self.history.append(analysis.macro_summary)
+                    return analysis.model_dump()
+                except Exception as ve:
+                    if attempt < 3:
+                        logger.warning(f"AI response validation failed (Attempt {attempt}/3): {ve}. Retrying...")
+                        kwargs["messages"].append({"role": "assistant", "content": raw_text})
+                        kwargs["messages"].append(
+                            {
+                                "role": "user",
+                                "content": f"Failed validation: {str(ve)}. Output valid JSON matching the schema.",
+                            }
+                        )
+                    else:
+                        raise ve
 
         except Exception as e:
             reason = self._extract_root_cause(e)

@@ -11,6 +11,7 @@ from .console import (
     countdown,
     error,
     info,
+    log_exception,
     output_panel,
     prompt,
     spinner,
@@ -105,6 +106,11 @@ def handle_log_error(sender, text, **kwargs):
     error(text)
 
 
+@events.log_traceback.connect
+def handle_log_traceback(sender, **kwargs):
+    log_exception()
+
+
 def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None):
     if cancel_token is None:
         cancel_token = CancelToken()
@@ -146,8 +152,9 @@ def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None
         try:
             # We don't have run_agent signature yet, assuming it only takes cancel_token right now
             run_agent(input_queue=input_queue, cancel_token=cancel_token)
-        except Exception:
-            logger.exception("Agent loop crashed")
+        except Exception as exc:
+            error(f"Agent loop crashed: {exc}")
+            log_exception()
         finally:
             events.agent_done.send("core")
 
@@ -166,9 +173,14 @@ def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None
                 info("Abort requested via UI StopToken (Ctrl+C). Exiting...")
                 break
 
+        # Wait for backend worker to finish cleanup (export_session_logs + sandbox.close)
+        # before the main thread exits. Capped at 5s in case of a hang.
+        done_event.wait(timeout=5.0)
+
     except KeyboardInterrupt:
         info("Interrupted by OS user signal (Ctrl+C). Exiting...")
         stop_token.stop()
+        done_event.wait(timeout=5.0)
     finally:
         global _active_spinner
         if _active_spinner:

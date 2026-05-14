@@ -82,17 +82,20 @@ def _log(level: int, msg: str) -> None:
 
 
 def info(msg: str) -> None:
-    console.print(f"[info]\\[INFO][/info] {escape(msg)}")
+    first_line = str(msg).splitlines()[0] if str(msg).splitlines() else str(msg)
+    console.print(f"[info]\\[INFO][/info] {escape(first_line)}")
     _log(logging.INFO, msg)
 
 
 def warn(msg: str) -> None:
-    console.print(f"[warn]\\[WARN][/warn] {escape(msg)}")
+    first_line = str(msg).splitlines()[0] if str(msg).splitlines() else str(msg)
+    console.print(f"[warn]\\[WARN][/warn] {escape(first_line)}")
     _log(logging.WARNING, msg)
 
 
 def error(msg: str) -> None:
-    console.print(f"[error]\\[ERROR][/error] {escape(msg)}")
+    first_line = str(msg).splitlines()[0] if str(msg).splitlines() else str(msg)
+    console.print(f"[error]\\[ERROR][/error] {escape(first_line)}")
     _log(logging.ERROR, msg)
 
 
@@ -165,8 +168,13 @@ def detail(msg: str) -> None:
 
 
 def print_exception() -> None:
-    """Rich traceback to terminal + plain traceback to log file."""
-    console.print_exception(show_locals=False)
+    """Single line error to terminal + plain traceback to log file."""
+    exc_type, exc_val, _ = sys.exc_info()
+    if exc_val:
+        console.print(f"[error]\\[ERROR][/error] {escape(str(exc_val).splitlines()[0])}")
+    else:
+        console.print("[error]\\[ERROR][/error] Unknown Exception")
+
     if _file_logger:
         _file_logger.error(traceback.format_exc())
 

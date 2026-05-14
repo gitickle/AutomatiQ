@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-VERSION = "0.1.3"
+VERSION = "0.1.4a1"
 
 # ── Persistent user-level directory (~/.automatiq/) ──────────────────────────
 # Stores binaries, logs, history, and user preferences across sessions.
@@ -91,7 +91,7 @@ recorder = "gemini/gemini-3.1-flash-lite-preview"
 
 [agent]
 # Maximum agent loop iterations before giving up.
-max_steps       = 60
+max_steps       = 100
 
 # How long (seconds) a single IPython cell is allowed to run.
 sandbox_timeout = 60

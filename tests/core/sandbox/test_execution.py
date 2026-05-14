@@ -54,6 +54,39 @@ def test_shell_command(sandbox: AgentSandbox):
     assert "foo" in result.lower()
 
 
+def test_shell_command_variable_substitution(sandbox: AgentSandbox):
+    """Test shell command variable substitution via Jinja-style {{ }} escapes"""
+    sandbox.execute("my_var = 'magic_value'")
+
+    # Test {{ }} substitution
+    result = sandbox.execute("!echo {{my_var}}")
+    assert "Status: Success" in result
+    assert "magic_value" in result.lower()
+
+    # Test nested dict/key access in {{ }}
+    sandbox.execute("my_dict = {'key': 'nested_magic'}")
+    result = sandbox.execute("!echo {{my_dict['key']}}")
+    assert "Status: Success" in result
+    assert "nested_magic" in result.lower()
+
+    # Test that single { } are passed through as literal text (not interpolated)
+    # This is crucial for awk/rg/regex support.
+    result = sandbox.execute("!echo {literal_braces}")
+    assert "Status: Success" in result
+    assert "{literal_braces}" in result.lower()
+
+    # Test escaping {{ and }} using the {{ '{{' }} trick
+    result = sandbox.execute("!echo {{ '{{' }}literal{{ '}}' }}")
+    assert "Status: Success" in result
+    assert "{{literal}}" in result.lower()
+
+    # Test that $ is passed to the shell (not interpolated by Python)
+    # In our jailed environment, $my_var won't be a shell variable, so it should be empty or literal $my_var
+    result = sandbox.execute("!echo $my_var")
+    assert "Status: Success" in result
+    assert "magic_value" not in result.lower()
+
+
 def test_shell_command_error(sandbox: AgentSandbox):
     """Test shell command that fails"""
     result = sandbox.execute("!some_nonexistent_binary_123")

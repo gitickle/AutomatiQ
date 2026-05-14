@@ -39,10 +39,12 @@ def mock_litellm_client(mocker):
 
 def test_agent_startup_and_missing_session(mock_config_workspace, mocker):
     """Verify that the agent exits if the session_dump directory is missing."""
+    import queue
+
     log_error_mock = mocker.patch.object(events.log_error, "send")
 
     with pytest.raises(SystemExit) as exc_info:
-        run_agent()
+        run_agent(input_queue=queue.Queue())
 
     assert exc_info.value.code == 1
     log_error_mock.assert_called_once()
@@ -136,9 +138,7 @@ def test_agent_tool_dispatch_execute(session_dump_dir, mock_sandbox, mock_litell
     import json
 
     mock_response_1.choices[0].message.tool_calls[0].function.arguments = json.dumps(
-        {
-            "ipython_script": "print('hi')",
-        }
+        {"ipython_script": "print('hi')", "description": "Prints hi to the console"}
     )
 
     mock_response_2 = mocker.MagicMock()
@@ -149,8 +149,7 @@ def test_agent_tool_dispatch_execute(session_dump_dir, mock_sandbox, mock_litell
     mock_response_2.choices[0].message.content = "I am done with the execution and will now talk to the user."
     mock_response_2.choices[0].message.tool_calls[0].function.arguments = json.dumps(
         {
-            "message_to_user": "Done",
-            "is_final_script": False,
+            "final_python_script": "print('hello')",
         }
     )
 
@@ -164,7 +163,6 @@ def test_agent_tool_dispatch_execute(session_dump_dir, mock_sandbox, mock_litell
     # Sandbox execute should be called with the script
     mock_sandbox.execute.assert_called_once_with("print('hi')")
 
-    # Code execution events should have fired
-    code_exec_start_mock.assert_called()
+    code_exec_start_mock.assert_called_once()
     code_exec_output_mock.assert_called_once()
     assert code_exec_output_mock.call_args[1]["output"] == "Mocked execution output"

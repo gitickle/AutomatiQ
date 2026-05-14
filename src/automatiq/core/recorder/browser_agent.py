@@ -138,6 +138,7 @@ class BrowserAgent:
             cdp.network.ResourceType.DOCUMENT,
             cdp.network.ResourceType.XHR,
             cdp.network.ResourceType.FETCH,
+            cdp.network.ResourceType.SCRIPT,
         ):
             self.stats["total_requests"] += 1
 
@@ -435,7 +436,7 @@ class BrowserAgent:
             logger.info("Starting Zendriver Browser...")
             self.browser = await zd.start(
                 headless=False,
-                browser_args=["--incognito", "--disable-popup-blocking", f"--user-data-dir={self._profile_dir.name}"],
+                browser_args=["--disable-popup-blocking", f"--user-data-dir={self._profile_dir.name}"],
             )
             self.recording_start = datetime.now(UTC)
             self.tab = await self.browser.get("about:blank")

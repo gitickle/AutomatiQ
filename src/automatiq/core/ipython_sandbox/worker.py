@@ -6,18 +6,12 @@ import time
 
 BUSYBOX_COMMANDS = [
     "ls",
-    "rm",
-    "cp",
-    "mv",
-    "mkdir",
-    "rmdir",
     "pwd",
     "cat",
     "wc",
     "sort",
     "uniq",
     "echo",
-    "touch",
     "df",
     "du",
     "base64",
@@ -27,15 +21,17 @@ BUSYBOX_COMMANDS = [
     "sleep",
     "grep",
     "tr",
-    "tee",
-    "mktemp",
     "seq",
     "awk",
     "head",
     "tail",
     "sh",
+    "sed",
+    "strings",
+    "hexdump",
+    "timeout",
 ]
-STANDALONE_COMMANDS = ["rg", "jq", "sd"]
+STANDALONE_COMMANDS = ["rg", "jq", "gron"]
 
 
 def apply_path_jail(bin_dir: str, workspace: str):
@@ -113,7 +109,78 @@ def ipython_worker(
 
     from IPython.core.interactiveshell import InteractiveShell
     from IPython.utils.capture import capture_output
+    from IPython.utils.text import FullEvalFormatter
     from traitlets.config import Config
+
+    class JinjaFormatter(FullEvalFormatter):
+        """
+        A formatter that only expands variables inside {{ }} (Jinja2 style).
+        Single { } and $ are treated as literal text, making it safe for regex and awk.
+        """
+
+        def parse(self, fmt_string: str):
+            pos = 0
+            length = len(fmt_string)
+
+            while pos < length:
+                # 1. TEXT MODE: Find the next '{{'
+                start_idx = fmt_string.find("{{", pos)
+
+                if start_idx == -1:
+                    # No more variables found, yield the remaining string as literal text
+                    yield (fmt_string[pos:], None, None, None)
+                    break
+
+                # Yield the literal text up to the '{{'
+                literal_text = fmt_string[pos:start_idx]
+
+                # 2. VARIABLE MODE: We are now inside {{ ... }}
+                # Move the position past the '{{'
+                pos = start_idx + 2
+                field_name_start = pos
+
+                in_string = False
+                string_char = None
+                escaped = False
+
+                # Scan forward to find the closing '}}', respecting string boundaries
+                while pos < length:
+                    char = fmt_string[pos]
+
+                    if in_string:
+                        # 3. STRING MODE: We are inside quotes
+                        if escaped:
+                            escaped = False
+                        elif char == "\\":
+                            escaped = True
+                        elif char == string_char:
+                            in_string = False
+                    else:
+                        # Not in a string, check for string start or variable end
+                        if char in ('"', "'"):
+                            in_string = True
+                            string_char = char
+                        elif char == "}" and pos + 1 < length and fmt_string[pos + 1] == "}":
+                            # Found the valid, unquoted closing '}}'
+                            break
+
+                    pos += 1
+
+                if pos >= length:
+                    # Reached the end of the input without finding '}}'
+                    raise ValueError("Missing closing '}}' for variable block")
+
+                # Extract the field name (the expression to be evaluated by FullEvalFormatter)
+                field_name = fmt_string[field_name_start:pos].strip()
+
+                # Yield the parsed segment
+                # (literal_text, field_name, format_spec, conversion)
+                yield (literal_text, field_name, "", None)
+
+                # Move position past the closing '}}' to resume TEXT MODE
+                pos += 2
+
+    InteractiveShell.var_expand.__defaults__ = (0, JinjaFormatter())
 
     c = Config()
     c.InteractiveShell.colors = "nocolor"
@@ -140,10 +207,12 @@ def ipython_worker(
         sh_path = os.path.join(os.environ["PATH"], "sh.exe") if "PATH" in os.environ else "sh.exe"
 
         def busybox_system(cmd):
+            cmd = shell.var_expand(cmd, depth=1)
             p = subprocess.Popen([sh_path, "-c", cmd], stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL)
             try:
                 while p.poll() is None:
                     time.sleep(0.05)
+                shell.user_ns["_exit_code"] = p.returncode
             except KeyboardInterrupt:
                 p.terminate()
                 try:
@@ -153,6 +222,7 @@ def ipython_worker(
                 raise
 
         def busybox_getoutput(cmd, split=True, depth=0):
+            cmd = shell.var_expand(cmd, depth=depth + 1)
             out = ""
             try:
                 p = subprocess.Popen(

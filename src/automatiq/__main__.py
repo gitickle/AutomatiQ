@@ -8,11 +8,49 @@ Usage:
 """
 
 import argparse
+import logging
 import multiprocessing
 import sys
 import threading
 
 from .cli.console import error, info, rule
+
+# ---------------------------------------------------------------------------
+# Banner gate — suppresses RichHandler output while the startup Live block
+# is active so that preload-thread logs don't bleed above the animation.
+# ---------------------------------------------------------------------------
+_banner_done = threading.Event()
+_banner_done.set()  # default: not animating, allow output freely
+
+
+class _GatedRichHandler(logging.Handler):
+    """Wraps a RichHandler but buffers records while the banner is live."""
+
+    def __init__(self, inner: logging.Handler):
+        super().__init__()
+        self._inner = inner
+        self._buf: list[logging.LogRecord] = []
+        self._lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if _banner_done.is_set():
+            # Banner finished — flush any buffered records first, then emit.
+            with self._lock:
+                buf, self._buf = self._buf, []
+            for r in buf:
+                self._inner.emit(r)
+            self._inner.emit(record)
+        else:
+            with self._lock:
+                self._buf.append(record)
+
+    def flush_buffer(self) -> None:
+        """Call once after banner finishes to drain any held records."""
+        with self._lock:
+            buf, self._buf = self._buf, []
+        for r in buf:
+            self._inner.emit(r)
+
 
 # ---------------------------------------------------------------------------
 # Background preload — runs concurrently with the startup banner so that
@@ -96,9 +134,11 @@ def _preload():
 
         level = logging.DEBUG if config.VERBOSE else logging.INFO
 
-        rich_handler = RichHandler(
+        _raw_handler = RichHandler(
             console=console, show_time=False, show_path=config.VERBOSE, markup=False, rich_tracebacks=True
         )
+        _raw_handler.setLevel(level)
+        rich_handler = _GatedRichHandler(_raw_handler)
         rich_handler.setLevel(level)
 
         automatiq_logger = logging.getLogger("automatiq")
@@ -386,12 +426,20 @@ def main():
         config.API_BASE = banner_base_url
 
     if config.BANNER_ENABLED and cmd in ("record", "agent", "run"):
+        _banner_done.clear()  # gate: buffer any preload logs during animation
         show_startup(
             version=config.VERSION,
             model=banner_model,
             recorder_model=config.RECORDER_AI_MODEL,
             speed=config.BANNER_SPEED,
         )
+        _banner_done.set()  # animation done: allow log output
+        # Flush any logs that arrived during the banner
+        _root_logger = logging.getLogger("automatiq")
+        for h in _root_logger.handlers:
+            if isinstance(h, _GatedRichHandler):
+                h.flush_buffer()
+                break
 
     if preload_thread.is_alive():
         from .cli.console import spinner
@@ -402,7 +450,20 @@ def main():
         preload_thread.join()
 
     if _preload_error is not None:
-        error(f"Startup init failed: {_preload_error}")
+        import socket
+
+        _e = _preload_error
+        if isinstance(_e, OSError | socket.gaierror) or (
+            isinstance(_e, RuntimeError) and "Could not download" in str(_e)
+        ):
+            error("No internet connection (or DNS failure) — could not download sandbox binaries.")
+            error("Please check your connection and re-run automatiq.")
+            if "URL:" in str(_e):  # show which binary failed
+                for line in str(_e).splitlines():
+                    if line.strip().startswith(("URL:", "Error:")):
+                        error(line.strip())
+        else:
+            error(f"Startup init failed: {_e}")
         sys.exit(1)
 
     parser = argparse.ArgumentParser(

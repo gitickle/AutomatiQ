@@ -1,7 +1,7 @@
 """
 Automatic binary downloader for the IPython sandbox PATH jail.
 
-Ensures rg, jq, sd (all platforms) and busybox (Windows only) are available.
+Ensures rg, jq, gron (all platforms) and busybox (Windows only) are available.
 Checks ~/.automatiq/bin first, then system PATH, then downloads with a Rich
 progress display.
 """
@@ -107,44 +107,72 @@ JQ_URLS = {
     ("darwin", "arm64"): "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64",
 }
 
-SD_URLS = {
-    ("windows", "amd64"): "https://github.com/chmln/sd/releases/download/v1.0.0/sd-v1.0.0-x86_64-pc-windows-msvc.zip",
+GRON_URLS = {
+    ("linux", "amd64"): "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-linux-amd64-0.7.1.tgz",
+    ("linux", "arm64"): "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-linux-arm64-0.7.1.tgz",
+    ("darwin", "amd64"): "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-darwin-amd64-0.7.1.tgz",
     (
-        "linux",
-        "amd64",
-    ): "https://github.com/chmln/sd/releases/download/v1.0.0/sd-v1.0.0-x86_64-unknown-linux-musl.tar.gz",
-    (
-        "linux",
+        "darwin",
         "arm64",
-    ): "https://github.com/chmln/sd/releases/download/v1.0.0/sd-v1.0.0-aarch64-unknown-linux-musl.tar.gz",
-    ("darwin", "amd64"): "https://github.com/chmln/sd/releases/download/v1.0.0/sd-v1.0.0-x86_64-apple-darwin.tar.gz",
-    ("darwin", "arm64"): "https://github.com/chmln/sd/releases/download/v1.0.0/sd-v1.0.0-aarch64-apple-darwin.tar.gz",
+    ): "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-darwin-arm64-0.7.1.tgz",
+    ("windows", "amd64"): "https://github.com/tomnomnom/gron/releases/download/v0.7.1/gron-windows-amd64-0.7.1.zip",
 }
 
 # ── Download helpers ─────────────────────────────────────────────────────────
 
 
-def _download_file(url: str, dest: Path, label: str | None = None, progress_callback: Callable[[int, int], None] = None):
-    """Download *url* to *dest*, reporting progress to *progress_callback*."""
+def _download_file(
+    url: str,
+    dest: Path,
+    label: str | None = None,
+    progress_callback: Callable[[int, int], None] = None,
+    retries: int = 3,
+):
+    """Download *url* to *dest*, reporting progress to *progress_callback*.
+
+    Retries up to *retries* times with backoff on transient network errors.
+    Raises RuntimeError with a user-friendly message if all attempts fail.
+    """
+    import time
+
     display = label or dest.name
+    last_exc: Exception | None = None
 
-    req = urllib.request.Request(url, headers={"User-Agent": "AutomatiQ/bin-manager"})
-    with urllib.request.urlopen(req) as resp:
-        total = int(resp.headers.get("Content-Length", 0))
-        downloaded = 0
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "AutomatiQ/bin-manager"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                with open(dest, "wb") as fp:
+                    while True:
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        fp.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            progress_callback(downloaded, total)
+            logger.info(f"Downloaded {display} ({dest.stat().st_size:,} bytes)")
+            return  # success
+        except OSError as exc:
+            last_exc = exc
+            dest.unlink(missing_ok=True)  # remove partial file
+            if attempt < retries - 1:
+                wait = 1.5 * (attempt + 1)
+                logger.warning(
+                    f"Download attempt {attempt + 1} failed for {display}, retrying in {wait:.0f}s... ({exc})"
+                )
+                time.sleep(wait)
 
-        with open(dest, "wb") as fp:
-            while True:
-                chunk = resp.read(64 * 1024)
-                if not chunk:
-                    break
-                fp.write(chunk)
-                downloaded += len(chunk)
-
-                if progress_callback:
-                    progress_callback(downloaded, total)
-
-    logger.info(f"Downloaded {display} ({dest.stat().st_size:,} bytes)")
+    # All retries exhausted
+    raise RuntimeError(
+        f"Could not download '{display}' after {retries} attempts.\n"
+        f"  This usually means no internet connection or a temporary DNS failure.\n"
+        f"  Please check your connection and try again.\n"
+        f"  URL: {url}\n"
+        f"  Error: {last_exc}"
+    ) from last_exc
 
 
 def _make_executable(path: Path):
@@ -277,20 +305,20 @@ def _ensure_jq(bin_dir: Path, os_name: str, arch: str, progress_callback: Callab
     _make_executable(dest)
 
 
-def _ensure_sd(bin_dir: Path, os_name: str, arch: str, progress_callback: Callable[[int, int], None] = None):
-    dest = bin_dir / _exe("sd")
+def _ensure_gron(bin_dir: Path, os_name: str, arch: str, progress_callback: Callable[[int, int], None] = None):
+    dest = bin_dir / _exe("gron")
     if dest.exists():
         return
-    found = shutil.which("sd")
+    found = shutil.which("gron")
     if found and _copy_system_binary(found, dest):
         return
-    url = SD_URLS.get((os_name, arch))
+    url = GRON_URLS.get((os_name, arch))
     if not url:
-        logger.warning(f"No sd download available for {os_name}/{arch}")
+        logger.warning(f"No gron download available for {os_name}/{arch}")
         return
     tmp = bin_dir / os.path.basename(url)
-    _download_file(url, tmp, label="sd", progress_callback=progress_callback)
-    _extract_binary_from_archive(tmp, _exe("sd"), dest)
+    _download_file(url, tmp, label="gron", progress_callback=progress_callback)
+    _extract_binary_from_archive(tmp, _exe("gron"), dest)
     tmp.unlink(missing_ok=True)
 
 
@@ -307,7 +335,7 @@ def ensure_binaries(progress_callback: Callable[[int, int], None] = None) -> Pat
     _ensure_busybox(bin_dir, os_name, arch, progress_callback)
     _ensure_rg(bin_dir, os_name, arch, progress_callback)
     _ensure_jq(bin_dir, os_name, arch, progress_callback)
-    _ensure_sd(bin_dir, os_name, arch, progress_callback)
+    _ensure_gron(bin_dir, os_name, arch, progress_callback)
 
     if os_name == "windows":
         bb = bin_dir / "busybox.exe"
@@ -318,7 +346,7 @@ def ensure_binaries(progress_callback: Callable[[int, int], None] = None) -> Pat
             sys.exit(1)
 
     # Only report missing tools; stay silent when everything is fine.
-    tools = ["busybox", "rg", "jq", "sd"] if os_name == "windows" else ["rg", "jq", "sd"]
+    tools = ["busybox", "rg", "jq", "gron"] if os_name == "windows" else ["rg", "jq", "gron"]
     missing = [t for t in tools if not (bin_dir / _exe(t)).exists() and not shutil.which(t)]
     if missing:
         logger.warning(f"Missing binaries: {', '.join(missing)}")

@@ -169,7 +169,7 @@ Development dependencies (pytest, ruff, pre-commit, etc.) are installed automati
 uv run pre-commit install
 ```
 
-Run tests and benchmarks:
+Run tests:
 ```bash
 uv run pytest
 ```
