@@ -386,10 +386,13 @@ def compile_workspace(
         # If we used a temporary name, let's figure out the real one
         if not session_name:
             domain_counts = {}
-            for req in requests:
-                domain = urlparse(req.get("url", "")).netloc
-                if domain:
-                    domain_counts[domain] = domain_counts.get(domain, 0) + 1
+            for action in actions:
+                if action.get("type") == "page_changed":
+                    new_url = action.get("newUrl") or action.get("url")
+                    if new_url:
+                        domain = urlparse(new_url).netloc
+                        if domain:
+                            domain_counts[domain] = domain_counts.get(domain, 0) + 1
 
             final_session_name = "recording"
             if domain_counts:
