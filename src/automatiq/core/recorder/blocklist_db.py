@@ -1,13 +1,10 @@
-import logging
 import sqlite3
 import time
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
-# blocklist_db is imported very early (before console's Rich setup may be ready),
-# so we use the stdlib logger directly rather than importing console helpers.
-_log = logging.getLogger("automatiq.blocklist")
+from .. import events
 
 
 class LRUCache:
@@ -41,9 +38,6 @@ def _reverse_domain(domain: str) -> str:
     """Reverse a domain for prefix-based subdomain matching.
 
     Example: 'ads.google.com' -> 'com.google.ads'
-
-    This lets us use SQLite's `LIKE 'com.google.%'` or `BETWEEN` to match
-    all subdomains of google.com in a single indexed query.
     """
     return ".".join(reversed(domain.lower().strip(".").split(".")))
 
@@ -52,24 +46,12 @@ def _extract_domain(url: str) -> str:
     """Pull the hostname out of a URL, lowercased."""
     try:
         return (urlparse(url).hostname or "").lower()
-    except Exception as exc:
-        _log.debug("Failed to parse URL %r: %s", url, exc)
+    except Exception:
         return ""
 
 
 class BlocklistDB:
-    """SQLite-backed domain blocklist with reversed-domain indexing and LRU cache.
-
-    Features:
-        - Subdomain matching via reversed-domain prefix queries
-        - Multiple named lists with independent enable/disable
-        - LRU cache so hot domains skip the DB entirely
-        - Atomic bulk inserts for fast list loading
-
-    Schema:
-        domains(reversed_domain TEXT, source TEXT, added_at REAL)
-        sources(name TEXT PK, url TEXT, enabled INT, loaded_at REAL, domain_count INT)
-    """
+    """SQLite-backed domain blocklist with reversed-domain indexing and LRU cache."""
 
     def __init__(self, db_path: str = ":memory:", cache_size: int = 4096):
         self.db_path = db_path
@@ -81,7 +63,8 @@ class BlocklistDB:
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._init_schema()
         except sqlite3.Error as exc:
-            _log.error("Failed to open/initialise blocklist DB at %s: %s", db_path, exc, exc_info=True)
+            events.log_error.send("recorder", text=f"Failed to open/initialise blocklist DB at {db_path}: {exc}")
+            events.log_traceback.send("recorder")
             raise
 
     def _init_schema(self) -> None:
@@ -111,21 +94,14 @@ class BlocklistDB:
             """)
             self._conn.commit()
         except sqlite3.Error as exc:
-            _log.error("Failed to create blocklist schema: %s", exc, exc_info=True)
+            events.log_error.send("recorder", text=f"Failed to create blocklist schema: {exc}")
+            events.log_traceback.send("recorder")
             raise
 
     # ── List management ──────────────────────────────────────────────
 
     def load_file(self, path: str, source_name: str | None = None, source_url: str | None = None) -> int:
-        """Parse a hosts/domain-list file and bulk-insert into the DB.
-
-        Supports:
-            - Plain domain lists  (one domain per line)
-            - Hosts format        (0.0.0.0 domain.com  /  127.0.0.1 domain.com)
-            - Comment lines       (# or !)
-
-        Returns the number of domains inserted.
-        """
+        """Parse a hosts/domain-list file and bulk-insert into the DB."""
         source_name = source_name or Path(path).stem
         now = time.time()
         domains = []
@@ -133,7 +109,8 @@ class BlocklistDB:
         try:
             fh = open(path, encoding="utf-8", errors="replace")
         except OSError as exc:
-            _log.error("Cannot open blocklist file %s: %s", path, exc)
+            events.log_error.send("recorder", text=f"Cannot open blocklist file {path}: {exc}")
+            events.log_traceback.send("recorder")
             return 0
 
         with fh as f:
@@ -182,7 +159,8 @@ class BlocklistDB:
             self._cache.clear()
             return len(domains)
         except sqlite3.Error as exc:
-            _log.error("Failed to load blocklist source '%s': %s", source_name, exc, exc_info=True)
+            events.log_error.send("recorder", text=f"Failed to load blocklist source '{source_name}': {exc}")
+            events.log_traceback.send("recorder")
             return 0
 
     def list_sources(self) -> list[dict]:
@@ -196,16 +174,7 @@ class BlocklistDB:
     # ── Lookup ───────────────────────────────────────────────────────
 
     def is_blocked(self, hostname: str) -> bool:
-        """Check whether a hostname (or any of its parent domains) is blocked.
-
-        Walks up the domain hierarchy:
-            ads.tracker.example.com
-                tracker.example.com
-                        example.com
-
-        Uses the LRU cache first, then falls back to a single SQL query
-        that checks all levels at once.
-        """
+        """Check whether a hostname (or any of its parent domains) is blocked."""
         hostname = hostname.lower().strip(".")
         if not hostname:
             return False
@@ -215,11 +184,9 @@ class BlocklistDB:
             return cached
 
         # Build all domain levels to check
-        # e.g. "a.b.c.com" -> ["com.c.b.a", "com.c.b", "com.c", "com"]
         parts = hostname.split(".")
         reversed_candidates = []
         for i in range(len(parts)):
-            # Take from index i to end, reverse
             sub = ".".join(parts[i:])
             reversed_candidates.append(_reverse_domain(sub))
 
@@ -238,7 +205,8 @@ class BlocklistDB:
 
             blocked = cur.fetchone() is not None
         except sqlite3.Error as exc:
-            _log.warning("Blocklist lookup failed for %s: %s", hostname, exc)
+            events.log_warn.send("recorder", text=f"Blocklist lookup failed for {hostname}: {exc}")
+            events.log_traceback.send("recorder")
             return False
 
         self._cache.put(hostname, blocked)
@@ -273,7 +241,8 @@ class BlocklistDB:
             try:
                 self._conn.close()
             except sqlite3.Error as exc:
-                _log.warning("Error closing blocklist DB: %s", exc)
+                events.log_warn.send("recorder", text=f"Error closing blocklist DB: {exc}")
+                events.log_traceback.send("recorder")
             finally:
                 self._conn = None
 

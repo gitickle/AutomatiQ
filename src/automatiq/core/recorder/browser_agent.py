@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 import zendriver as zd
 from zendriver import cdp
 
+from .. import events
 from .blocklist_db import BlocklistDB
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,8 @@ class BrowserAgent:
                 self.visuals_script = f.read()
             return True
         except FileNotFoundError as e:
-            logger.error(f"Missing JS dependencies: {e}")
+            events.log_error.send("recorder", text=f"Missing JS dependencies: {e}")
+            events.log_traceback.send("recorder")
             return False
 
     @staticmethod
@@ -121,14 +123,17 @@ class BrowserAgent:
 
                 action_type = payload.get("type")
                 if action_type == "keypress":
-                    logger.info(f"[ACTION] keypress: {payload.get('key')}")
+                    events.log_info.send("recorder", text=f"[ACTION] keypress: {payload.get('key')}")
                 elif action_type == "click":
-                    logger.info(f"[ACTION] click: {payload.get('text', '')[:50]}")
+                    events.log_info.send("recorder", text=f"[ACTION] click: {payload.get('text', '')[:50]}")
                 else:
-                    logger.info(f"[ACTION] {action_type}: {payload.get('value', payload.get('newUrl', ''))[:50]}")
+                    events.log_info.send(
+                        "recorder",
+                        text=f"[ACTION] {action_type}: {payload.get('value', payload.get('newUrl', ''))[:50]}",
+                    )
             except Exception as e:
-                logger.error(f"Binding handler failed: {e}")
-                logger.exception("Exception occurred")
+                events.log_error.send("recorder", text=f"Binding handler failed: {e}")
+                events.log_traceback.send("recorder")
 
     async def request_handler(self, event: cdp.network.RequestWillBeSent):
         if event.wall_time:
@@ -198,7 +203,8 @@ class BrowserAgent:
             try:
                 self._streamed_bodies[rid].append(base64.b64decode(event.data))
             except Exception as exc:
-                logger.warning(f"Failed to decode streamed body chunk for request {rid}: {exc}")
+                events.log_warn.send("recorder", text=f"Failed to decode streamed body chunk for request {rid}: {exc}")
+                events.log_traceback.send("recorder")
 
     async def response_handler(self, event: cdp.network.ResponseReceived):
         if event.request_id in self.active_map:
@@ -246,12 +252,18 @@ class BrowserAgent:
                 if buffered:
                     self._streamed_bodies[rid].append(base64.b64decode(buffered))
             except Exception as e:
+                error_str = str(e)
                 # If Chrome says it's already finished, silently ignore it.
-                if "already finished loading" in str(e):
+                if (
+                    "already finished loading" in error_str
+                    or "Request with the provided ID" in error_str
+                    or "No resource with given identifier" in error_str
+                ):
                     pass
                 else:
                     # If it's some OTHER weird error, we still want to know about it.
-                    logger.warning(f"stream_resource_content failed: {e}")
+                    events.log_warn.send("recorder", text=f"stream_resource_content failed: {e}")
+                    events.log_traceback.send("recorder")
 
     async def loading_finished_handler(self, event: cdp.network.LoadingFinished):
         if event.request_id in self.active_map:
@@ -341,7 +353,7 @@ class BrowserAgent:
             self.stats["failed"] += 1
             self._streamed_bodies.pop(str(event.request_id), None)
             self.active_map.pop(event.request_id, None)
-            logger.warning(f"Request failed: {req['url'][:60]} - {event.error_text}")
+            events.log_warn.send("recorder", text=f"Request failed: {req['url'][:60]} - {event.error_text}")
 
     async def req_extra_info(self, event: cdp.network.RequestWillBeSentExtraInfo):
         cookies = [ac.to_json() for ac in event.associated_cookies]
@@ -372,7 +384,7 @@ class BrowserAgent:
 
         # We only care about full pages (not service workers or iframes)
         if target_info.type_ == "page":
-            logger.info(f"New Tab/Window Opened: {target_info.url}")
+            events.log_info.send("recorder", text=f"New Tab/Window Opened: {target_info.url}")
 
             # Wait a tiny moment for zendriver to internally register the new tab
             await asyncio.sleep(0.5)
@@ -380,7 +392,6 @@ class BrowserAgent:
             # Find the actual Tab object zendriver created for this session
             tab_session = None
             for t in self.browser.targets:
-                # Some zendriver versions expose .session_id, others expose .target_id
                 if (
                     getattr(t, "session_id", None) == event.session_id
                     or getattr(t, "target_id", None) == target_info.target_id
@@ -389,10 +400,10 @@ class BrowserAgent:
                     break
 
             if not tab_session:
-                logger.warning(f"Could not resolve Tab object for session {event.session_id}")
+                events.log_warn.send("recorder", text=f"Could not resolve Tab object for session {event.session_id}")
                 return
 
-            logger.info(f"Successfully bound CDP to new tab: {target_info.target_id}")
+            events.log_info.send("recorder", text=f"Successfully bound CDP to new tab: {target_info.target_id}")
 
             try:
                 # Now we can send CDP commands directly to this specific tab!
@@ -425,15 +436,17 @@ class BrowserAgent:
                     cdp.page.add_script_to_evaluate_on_new_document(source=self.visuals_script, run_immediately=True)
                 )
             except Exception as exc:
-                logger.warning(f"Failed to initialise CDP on new tab {target_info.target_id}: {exc}")
-                logger.exception("Exception occurred")
+                events.log_warn.send(
+                    "recorder", text=f"Failed to initialise CDP on new tab {target_info.target_id}: {exc}"
+                )
+                events.log_traceback.send("recorder")
 
     async def run_session(self, url: str, stop_token=None) -> dict:
         if not self._load_scripts():
             return {}
 
         try:
-            logger.info("Starting Zendriver Browser...")
+            events.log_info.send("recorder", text="Starting Zendriver Browser...")
             self.browser = await zd.start(
                 headless=False,
                 browser_args=["--disable-popup-blocking", f"--user-data-dir={self._profile_dir.name}"],
@@ -441,7 +454,7 @@ class BrowserAgent:
             self.recording_start = datetime.now(UTC)
             self.tab = await self.browser.get("about:blank")
 
-            logger.info("Enabling CDP domains and binding handlers...")
+            events.log_info.send("recorder", text="Enabling CDP domains and binding handlers...")
             await self.tab.send(cdp.page.enable())
             await self.tab.send(cdp.page.set_bypass_csp(enabled=True))
             await self.tab.send(
@@ -475,36 +488,36 @@ class BrowserAgent:
             self.browser.connection.add_handler(cdp.target.AttachedToTarget, self.target_created_handler)
             await self.browser.connection.send(cdp.target.set_discover_targets(discover=True))
 
-            logger.info(f"Navigating to {url}")
+            events.log_info.send("recorder", text=f"Navigating to {url}")
             await self.tab.send(cdp.page.navigate(url=url))
 
             while not (stop_token and stop_token.is_stopped()):
                 await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
-            logger.info("Session asyncio loop cancelled.")
+            events.log_info.send("recorder", text="Session asyncio loop cancelled.")
             if stop_token:
                 stop_token.stop()
         except KeyboardInterrupt:
-            logger.warning("Session encountered KeyboardInterrupt.")
+            events.log_warn.send("recorder", text="Session encountered KeyboardInterrupt.")
             if stop_token:
                 stop_token.stop()
         except Exception as e:
-            logger.error(f"Session encountered an error: {e}")
-            logger.exception("Exception occurred")
+            events.log_error.send("recorder", text=f"Session encountered an error: {e}")
+            events.log_traceback.send("recorder")
 
         return await self._cleanup_and_build_report()
 
     async def _wait_for_pending_requests(self, timeout: float = 10.0, idle_time: float = 1.0) -> None:
-        """Wait until all tracked requests in active_map have resolved
-        (LoadingFinished/LoadingFailed), or until we've been network-idle
-        for `idle_time` seconds, whichever comes first.
-        Gives up entirely after `timeout` seconds."""
+        """Wait until all tracked requests in active_map have resolved."""
         if not self.active_map:
             return
 
         pending = len(self.active_map)
-        logger.info(f"Waiting for {pending} pending request(s) to complete (timeout={timeout}s, idle={idle_time}s)...")
+        events.log_info.send(
+            "recorder",
+            text=f"Waiting for {pending} pending request(s) to complete (timeout={timeout}s, idle={idle_time}s)...",
+        )
 
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
@@ -514,35 +527,38 @@ class BrowserAgent:
         while self.active_map and loop.time() < deadline:
             current_count = len(self.active_map)
             if current_count != prev_count:
-                # Map changed — something resolved, reset the idle timer
                 last_change = loop.time()
                 prev_count = current_count
 
-            # If the map hasn't changed for `idle_time`, assume stragglers won't resolve
             if loop.time() - last_change >= idle_time:
-                logger.info(f"Network idle for {idle_time}s with {current_count} request(s) still pending — moving on.")
+                events.log_info.send(
+                    "recorder",
+                    text=f"Network idle for {idle_time}s with {current_count} request(s) still pending — moving on.",
+                )
                 break
 
             await asyncio.sleep(0.1)
 
         remaining = len(self.active_map)
         if remaining:
-            logger.warning(f"Drain finished with {remaining} request(s) still pending after {timeout}s.")
+            events.log_warn.send(
+                "recorder", text=f"Drain finished with {remaining} request(s) still pending after {timeout}s."
+            )
         else:
-            logger.info("All pending requests resolved.")
+            events.log_info.send("recorder", text="All pending requests resolved.")
 
     async def _cleanup_and_build_report(self) -> dict:
         # Let in-flight requests settle before tearing down
         try:
             await asyncio.wait_for(self._wait_for_pending_requests(), timeout=10.0)
         except TimeoutError:
-            logger.warning("Timeout waiting for pending requests. Moving on.")
+            events.log_warn.send("recorder", text="Timeout waiting for pending requests. Moving on.")
 
-        logger.info("Processing incomplete network requests...")
+        events.log_info.send("recorder", text="Processing incomplete network requests...")
 
         incomplete_count = len(self.active_map)
         if incomplete_count > 0:
-            logger.warning(f"Found {incomplete_count} incomplete requests.")
+            events.log_warn.send("recorder", text=f"Found {incomplete_count} incomplete requests.")
             for _request_id, req in self.active_map.items():
                 current_state = req.get("request_state", "unknown")
                 if current_state == "pending":
@@ -564,19 +580,22 @@ class BrowserAgent:
             if self.browser:
                 await asyncio.wait_for(self.browser.stop(), timeout=5.0)
         except Exception as exc:
-            logger.warning(f"Failed to stop browser cleanly, ignoring: {exc}")
+            events.log_warn.send("recorder", text=f"Failed to stop browser cleanly, ignoring: {exc}")
+            events.log_traceback.send("recorder")
 
         try:
             self._profile_dir.cleanup()
         except Exception as exc:
-            logger.warning(f"Could not clean up temporary Chrome profile: {exc}")
+            events.log_warn.send("recorder", text=f"Could not clean up temporary Chrome profile: {exc}")
+            events.log_traceback.send("recorder")
 
         recording_end = datetime.now(UTC)
         duration = (recording_end - self.recording_start).total_seconds() if self.recording_start else 0.0
 
-        logger.info(
-            f"Collection Complete. Captured {len(self.captured_requests)} requests "
-            f"and {len(self.captured_actions)} actions over {duration:.2f}s."
+        events.log_info.send(
+            "recorder",
+            text=f"Collection Complete. Captured {len(self.captured_requests)} requests "
+            f"and {len(self.captured_actions)} actions over {duration:.2f}s.",
         )
 
         return {

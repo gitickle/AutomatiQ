@@ -53,7 +53,7 @@ MAX_FRAMES_PER_PROMPT = 8
 # ── Blocklist sources ────────────────────────────────────────────────────────
 BLOCKLIST_SOURCES = {
     "stevenblack": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-    "adaway": "https://adaway.org/hosts.txt",
+    "adaway": "https://raw.githubusercontent.com/AdAway/adaway.github.io/master/hosts.txt",
 }
 
 # ── Agent tunables ───────────────────────────────────────────────────────────
@@ -198,6 +198,12 @@ def _load_config_toml():
 _load_config_toml()
 
 
+def ensure_system_dirs():
+    for d in (HOME_DIR, BIN_DIR, LOGS_DIR, HISTORY_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+
+
 def ensure_output_dirs():
-    for d in (HOME_DIR, BIN_DIR, LOGS_DIR, HISTORY_DIR, OUTPUT_DIR, WORKSPACE_DIR, BLOCKLIST_DIR):
+    ensure_system_dirs()
+    for d in (OUTPUT_DIR, WORKSPACE_DIR, BLOCKLIST_DIR):
         d.mkdir(parents=True, exist_ok=True)

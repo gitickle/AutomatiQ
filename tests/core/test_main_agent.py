@@ -14,11 +14,16 @@ def mock_config_workspace(tmp_path, mocker):
 
 
 @pytest.fixture
-def session_dump_dir(mock_config_workspace):
-    dump_dir = mock_config_workspace / "session_dump"
-    dump_dir.mkdir()
-    (dump_dir / "dummy.txt").write_text("dummy")
-    return dump_dir
+def session_dump_dir(mock_config_workspace, mocker):
+    root_dir = mock_config_workspace / "mock_session"
+    root_dir.mkdir()
+    import json
+
+    (root_dir / "session_metadata.json").write_text(json.dumps({"status": "completed"}))
+    workspace_dir = root_dir / "workspace"
+    workspace_dir.mkdir()
+    mocker.patch("automatiq.core.main.find_latest_session_dir", return_value=root_dir)
+    return root_dir
 
 
 @pytest.fixture
@@ -41,6 +46,7 @@ def test_agent_startup_and_missing_session(mock_config_workspace, mocker):
     """Verify that the agent exits if the session_dump directory is missing."""
     import queue
 
+    mocker.patch("automatiq.core.main.find_latest_session_dir", return_value=None)
     log_error_mock = mocker.patch.object(events.log_error, "send")
 
     with pytest.raises(SystemExit) as exc_info:
@@ -48,7 +54,7 @@ def test_agent_startup_and_missing_session(mock_config_workspace, mocker):
 
     assert exc_info.value.code == 1
     log_error_mock.assert_called_once()
-    assert "No recorded session found" in log_error_mock.call_args[1]["text"]
+    assert "No valid completed sessions found" in log_error_mock.call_args[1]["text"]
 
 
 def test_agent_user_exit(session_dump_dir, mock_sandbox, mock_litellm_client, mocker):

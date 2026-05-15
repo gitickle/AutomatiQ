@@ -8,6 +8,8 @@ import imageio_ffmpeg
 import mss
 import numpy as np
 
+from .. import events
+
 logger = logging.getLogger(__name__)
 
 FFMPEG_TIMEOUT = 120  # seconds — guard against hanging FFmpeg slice operations
@@ -26,7 +28,7 @@ class ActionVideoRecorder:
     def start(self) -> None:
         """Starts the screen recording in a background thread."""
         if self.is_recording:
-            logger.warning("Recording is already active.")
+            events.log_warn.send("recorder", text="Recording is already active.")
             return
 
         output_dir = os.path.dirname(self.output_path)
@@ -42,13 +44,13 @@ class ActionVideoRecorder:
 
     def _record_loop(self) -> None:
         """The core recording loop executed by the background thread."""
-        logger.info(f"Initializing video writer at {self.fps} FPS...")
+        events.log_info.send("recorder", text=f"Initializing video writer at {self.fps} FPS...")
         writer = None
 
         try:
             with mss.mss() as sct:
                 if not sct.monitors or len(sct.monitors) < 2:
-                    logger.error("No monitors detected — cannot record screen.")
+                    events.log_error.send("recorder", text="No monitors detected — cannot record screen.")
                     return
 
                 monitor = sct.monitors[1]
@@ -69,7 +71,7 @@ class ActionVideoRecorder:
 
                 # CRITICAL: Record the exact Unix timestamp immediately before the first frame
                 self.video_start_unix = time.time()
-                logger.info(f"[VIDEO] Recording started at UNIX {self.video_start_unix}")
+                events.log_info.send("recorder", text=f"[VIDEO] Recording started at UNIX {self.video_start_unix}")
 
                 while self.is_recording:
                     loop_start = time.time()
@@ -83,23 +85,23 @@ class ActionVideoRecorder:
                         time.sleep(sleep_time)
 
         except Exception as e:
-            logger.error(f"Video recording thread failed: {e}")
-            logger.exception("Exception occurred")
+            events.log_error.send("recorder", text=f"Video recording thread failed: {e}")
+            events.log_traceback.send("recorder")
         finally:
             if writer is not None:
                 try:
                     writer.close()
-                    logger.info(f"[VIDEO] Recording finalized and saved to {self.output_path}")
+                    events.log_info.send("recorder", text=f"[VIDEO] Recording finalized and saved to {self.output_path}")
                 except Exception as e:
-                    logger.error(f"Failed to close video writer: {e}")
-                    logger.exception("Exception occurred")
+                    events.log_error.send("recorder", text=f"Failed to close video writer: {e}")
+                    events.log_traceback.send("recorder")
 
     def stop(self) -> float | None:
         """Stops the recording thread and returns the exact start timestamp for alignment."""
         if not self.is_recording:
             return self.video_start_unix
 
-        logger.info("Halting video recording...")
+        events.log_info.send("recorder", text="Halting video recording...")
         self.is_recording = False
 
         if self.thread:
@@ -147,14 +149,17 @@ class ActionVideoRecorder:
             if os.path.exists(output_file) and os.path.getsize(output_file) > 5000:
                 return True
             else:
-                logger.error(f"FFmpeg produced an empty or invalid clip for {output_file}.")
-                logger.error(f"FFmpeg Error Log: {result.stderr}")
+                events.log_error.send("recorder", text=f"FFmpeg produced an empty or invalid clip for {output_file}.")
+                events.log_error.send("recorder", text=f"FFmpeg Error Log: {result.stderr}")
                 return False
 
         except subprocess.TimeoutExpired:
-            logger.error(f"FFmpeg video split timed out after {FFMPEG_TIMEOUT}s for {output_file}")
+            events.log_error.send(
+                "recorder", text=f"FFmpeg video split timed out after {FFMPEG_TIMEOUT}s for {output_file}"
+            )
+            events.log_traceback.send("recorder")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error during video split: {e}")
-            logger.exception("Exception occurred")
+            events.log_error.send("recorder", text=f"Unexpected error during video split: {e}")
+            events.log_traceback.send("recorder")
             return False

@@ -9,7 +9,7 @@ import os
 import tempfile
 import urllib.request
 
-from .. import config
+from .. import config, events
 from ..cancel_standard import CancelToken, StopToken
 from .blocklist_db import BlocklistDB
 from .browser_agent import BrowserAgent
@@ -27,16 +27,15 @@ def _init_blocklist() -> BlocklistDB:
         hosts_file = config.BLOCKLIST_DIR / f"{name}.txt"
 
         if not hosts_file.exists():
-            logger.info(f"Downloading blocklist '{name}' ...")
+            events.log_info.send("recorder", text=f"Downloading blocklist '{name}' ...")
             try:
                 urllib.request.urlretrieve(url, str(hosts_file))
-                logger.info(f"Saved {hosts_file.name}")
+                events.log_info.send("recorder", text=f"Saved {hosts_file.name}")
             except Exception as exc:
-                logger.warning(f"Failed to download blocklist '{name}': {exc}")
+                events.log_warn.send("recorder", text=f"Failed to download blocklist '{name}': {exc}")
                 continue
 
-        count = db.load_file(str(hosts_file), source_name=name, source_url=url)
-        logger.debug(f"{name}: {count:,} domains")
+        db.load_file(str(hosts_file), source_name=name, source_url=url)
 
     return db
 
@@ -65,11 +64,11 @@ def run_recording(
     _video_recorder = ActionVideoRecorder(fps=config.FPS, output_path=temp_video_path)
     _browser_agent = BrowserAgent(blocklist=blocklist)
 
-    logger.info("[RULE] STARTING RECORDER")
-    logger.info(f"Target URL : {url}")
-    logger.info(f"AI Model   : {config.RECORDER_AI_MODEL}")
-    logger.info(f"Blocklist  : {blocklist.total_enabled_domains()} domains loaded")
-    logger.info("Press Ctrl+C to stop recording")
+    events.log_info.send("recorder", text="[RULE] STARTING RECORDER")
+    events.log_info.send("recorder", text=f"Target URL : {url}")
+    events.log_info.send("recorder", text=f"AI Model   : {config.RECORDER_AI_MODEL}")
+    events.log_info.send("recorder", text=f"Blocklist  : {blocklist.total_enabled_domains()} domains loaded")
+    events.log_info.send("recorder", text="Press Ctrl+C to stop recording")
 
     session_data = None
     success = False
@@ -78,20 +77,19 @@ def run_recording(
         _video_recorder.start()
         session_data = asyncio.run(_browser_agent.run_session(url=url, stop_token=stop_token))
     except KeyboardInterrupt:
-        # If a raw SIGINT still sneaks through (e.g. from the async loop)
-        logger.warning("KeyboardInterrupt caught in run_recording.")
+        events.log_warn.send("recorder", text="KeyboardInterrupt caught in run_recording.")
         if stop_token:
             stop_token.stop()
     except Exception as exc:
-        logger.error(f"Recording session failed: {exc}")
-        logger.exception("Exception occurred")
+        events.log_error.send("recorder", text=f"Recording session failed: {exc}")
+        events.log_traceback.send("recorder")
     finally:
         video_start_unix = None
         try:
             video_start_unix = _video_recorder.stop()
         except Exception as exc:
-            logger.error(f"Failed to stop video recorder: {exc}")
-            logger.exception("Exception occurred")
+            events.log_error.send("recorder", text=f"Failed to stop video recorder: {exc}")
+            events.log_traceback.send("recorder")
 
         if stop_token:
             stop_token.reset()
@@ -105,6 +103,16 @@ def run_recording(
             cancel_token.reset()
             return True
 
+        blocked = _browser_agent.stats["blocked_by_blocklist"] if _browser_agent else 0
+        if blocked:
+            events.log_info.send("recorder", text=f"Blocklist filtered {blocked} ad/tracker request(s)")
+
+        try:
+            blocklist.close()
+        except Exception as exc:
+            events.log_warn.send("recorder", text=f"Failed to close blocklist DB: {exc}")
+            events.log_traceback.send("recorder")
+
         if session_data and video_start_unix:
             try:
                 final_video_path, success = compile_workspace(
@@ -117,22 +125,13 @@ def run_recording(
                     stop_token=stop_token,
                 )
             except Exception as exc:
-                logger.error(f"Workspace compilation raised unexpectedly: {exc}")
-                logger.exception("Exception occurred")
+                events.log_error.send("recorder", text=f"Workspace compilation raised unexpectedly: {exc}")
+                events.log_traceback.send("recorder")
                 success = False
 
             if success and final_video_path:
-                logger.info(f"Full recording saved to {final_video_path}")
+                events.log_info.send("recorder", text=f"Full recording saved to {final_video_path}")
         else:
-            logger.warning("Session data or video timestamp missing. Skipping compilation.")
-
-        blocked = _browser_agent.stats["blocked_by_blocklist"] if _browser_agent else 0
-        if blocked:
-            logger.info(f"Blocklist filtered {blocked} ad/tracker request(s)")
-
-        try:
-            blocklist.close()
-        except Exception as exc:
-            logger.warning(f"Failed to close blocklist DB: {exc}")
+            events.log_warn.send("recorder", text="Session data or video timestamp missing. Skipping compilation.")
 
     return success

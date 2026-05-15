@@ -7,7 +7,7 @@ import shutil
 import traceback
 from urllib.parse import urlparse
 
-from .. import config
+from .. import config, events
 from ..cancel_standard import StopRequestedException
 from .ai_analyzer import VideoActionAnalyzer
 from .video_recorder import ActionVideoRecorder
@@ -19,11 +19,11 @@ try:
 
     magika_detector = Magika()
     MAGIKA_AVAILABLE = True
-    logger.info("Magika AI detector initialized successfully.")
+    events.log_info.send("recorder", text="Magika AI detector initialized successfully.")
 except ImportError:
     magika_detector = None
     MAGIKA_AVAILABLE = False
-    logger.warning("Magika not installed. Skipping advanced content type detection.")
+    events.log_warn.send("recorder", text="Magika not installed. Skipping advanced content type detection.")
 
 WORKSPACE_DIR = str(config.WORKSPACE_DIR)
 
@@ -110,7 +110,8 @@ def detect_content_type(content, is_base64=False):
             "group": result.output.group,
         }
     except Exception as e:
-        logger.warning(f"Magika error: {e}")
+        events.log_warn.send("recorder", text=f"Magika error: {e}")
+        events.log_traceback.send("recorder")
         return {"label": "unknown", "mime_type": "application/octet-stream", "extension": "bin", "error": str(e)}
 
 
@@ -122,7 +123,8 @@ def save_content(path, content, is_base64=False):
         try:
             data = base64.b64decode(content)
         except Exception as exc:
-            logger.warning(f"Base64 decode failed for {path}, saving raw content instead: {exc}")
+            events.log_warn.send("recorder", text=f"Base64 decode failed for {path}, saving raw content instead: {exc}")
+            events.log_traceback.send("recorder")
             data = str(content).encode("utf-8")
     elif isinstance(content, str):
         data = content.encode("utf-8")
@@ -132,8 +134,8 @@ def save_content(path, content, is_base64=False):
         with open(path, mode) as f:
             f.write(data)
     except OSError as exc:
-        logger.error(f"Failed to write content to {path}: {exc}")
-        logger.exception("Exception occurred")
+        events.log_error.send("recorder", text=f"Failed to write content to {path}: {exc}")
+        events.log_traceback.send("recorder")
 
 
 def merge_and_annotate_actions(
@@ -174,18 +176,18 @@ def merge_and_annotate_actions(
     # Import CancelToken standard and cancellable runner from the parent package.
     from ..cancel_standard import CancelRequestedException, run_cancellable
 
-    logger.info(f"Extracting {len(merged_clips)} video action segments for AI...")
+    events.log_info.send("recorder", text=f"Extracting {len(merged_clips)} video action segments for AI...")
     for idx, cluster in enumerate(merged_clips):
         if stop_token and stop_token.is_stopped():
-            logger.error("Compilation completely aborted by user (Ctrl+C).")
+            events.log_error.send("recorder", text="Compilation completely aborted by user (Ctrl+C).")
             raise StopRequestedException("Compilation completely aborted by user.")
 
         if cancel_token and cancel_token.is_cancelled():
             remaining = len(merged_clips) - idx
             if on_skip_requested and on_skip_requested(remaining):
-                logger.warning(f"Skipping AI analysis for remaining {remaining} segment(s).")
+                events.log_warn.send("recorder", text=f"Skipping AI analysis for remaining {remaining} segment(s).")
                 break
-            logger.info("Continuing AI analysis...")
+            events.log_info.send("recorder", text="Continuing AI analysis...")
 
         first_action_time_relative = cluster[0]["timestamp_unix"] - video_start_unix
         clip_start = max(0, first_action_time_relative - config.SEGMENT_PAD_SECONDS)
@@ -210,11 +212,13 @@ def merge_and_annotate_actions(
             except CancelRequestedException:
                 remaining = len(merged_clips) - idx
                 if on_skip_requested and on_skip_requested(remaining):
-                    logger.warning(f"Skipping AI analysis for remaining {remaining} segment(s).")
+                    events.log_warn.send("recorder", text=f"Skipping AI analysis for remaining {remaining} segment(s).")
                     break
-                logger.info("Continuing AI analysis...")
+                events.log_info.send("recorder", text="Continuing AI analysis...")
                 continue
-            logger.info(f"[AI] Segment {idx:03d} summary: {ai_description.get('macro_summary')}")
+            events.log_info.send(
+                "recorder", text=f"[AI] Segment {idx:03d} summary: {ai_description.get('macro_summary')}"
+            )
 
             for action in cluster:
                 action["ai_macro_summary"] = ai_description.get("macro_summary")
@@ -224,9 +228,10 @@ def merge_and_annotate_actions(
                 action["video_start_sec"] = round(clip_start, 2)
                 action["video_end_sec"] = round(clip_end, 2)
         else:
-            logger.warning(
-                f"Video split failed for segment {idx:03d} ({clip_start:.1f}s-{clip_end:.1f}s) "
-                f"— skipping AI annotation for {len(cluster)} action(s)"
+            events.log_warn.send(
+                "recorder",
+                text=f"Video split failed for segment {idx:03d} ({clip_start:.1f}s-{clip_end:.1f}s) "
+                f"— skipping AI annotation for {len(cluster)} action(s)",
             )
 
     return actions
@@ -330,39 +335,42 @@ def process_network_requests(requests: list[dict], requests_dir: str, output_dir
             )
 
         except Exception as e:
-            logger.error(f"Failed to process request at index {idx}: {e}")
-            logger.exception("Exception occurred")
+            events.log_error.send("recorder", text=f"Failed to process request at index {idx}: {e}")
+            events.log_traceback.send("recorder")
             error_filename = os.path.join(output_dir, f"CRASH_REPORT_{idx:03d}.txt")
             try:
                 with open(error_filename, "w", encoding="utf-8") as debug_f:
                     debug_f.write(f"ERROR: {str(e)}\n" + "-" * 50 + "\n")
                     debug_f.write(traceback.format_exc() + "\n" + "-" * 50 + "\n")
-                logger.debug(f"  Crash report saved to {error_filename}")
             except OSError as write_exc:
-                logger.warning(f"Could not write crash report to {error_filename}: {write_exc}")
+                events.log_warn.send("recorder", text=f"Could not write crash report to {error_filename}: {write_exc}")
+                events.log_traceback.send("recorder")
             continue
 
     return timeline_requests, detection_stats
 
 
-def calculate_checksum(directory: str) -> dict:
-    import hashlib
+def verify_timeline_files(session_dump_dir: str, timeline_events: list[dict]) -> bool:
+    """Verifies that all files referenced in the timeline events exist on disk."""
+    missing_files = []
 
-    checksums = {}
-    for root, _, files in os.walk(directory):
-        for file in files:
-            file_path = os.path.join(root, file)
-            # Skip metadata itself to avoid self-referential hash changes
-            if file == "session_metadata.json":
-                continue
-            with open(file_path, "rb") as f:
-                file_hash = hashlib.sha256()
-                while chunk := f.read(1024 * 1024 * 16):  # 16MB chunks
-                    file_hash.update(chunk)
+    for event in timeline_events:
+        if event.get("event_type") == "network_request" and "folder" in event:
+            # Only check that the core transaction file we created exists
+            transaction_path = os.path.join(session_dump_dir, event["folder"], "transaction.json")
+            if not os.path.exists(transaction_path):
+                missing_files.append(transaction_path)
 
-            rel_path = os.path.relpath(file_path, directory).replace("\\", "/")
-            checksums[rel_path] = file_hash.hexdigest()
-    return checksums
+        elif event.get("event_type") == "user_action" and "ai_video_file" in event:
+            # Only check that the video clip we created exists
+            clip_path = os.path.join(session_dump_dir, event["ai_video_file"])
+            if not os.path.exists(clip_path):
+                missing_files.append(clip_path)
+
+    if missing_files:
+        events.log_warn.send("recorder", text=f"Timeline verification failed. Missing files: {missing_files}")
+        return False
+    return True
 
 
 def compile_workspace(
@@ -374,8 +382,8 @@ def compile_workspace(
     cancel_token=None,
     stop_token=None,
 ) -> tuple[str | None, bool]:
-    logger.info("[RULE] Compiling Workspace")
-    logger.info("Extracting data, and analyzing video...")
+    events.log_info.send("recorder", text="[RULE] Compiling Workspace")
+    events.log_info.send("recorder", text="Extracting data, and analyzing video...")
 
     try:
         metadata = session_data.get("metadata", {})
@@ -383,45 +391,22 @@ def compile_workspace(
         actions = session_data.get("actions", [])
         timeline_events = []
 
-        # If we used a temporary name, let's figure out the real one
+        # If we used a temporary name, let's figure out a fallback based on domains
+        fallback_session_name = "recording"
         if not session_name:
             domain_counts = {}
             for action in actions:
-                if action.get("type") == "page_changed":
-                    new_url = action.get("newUrl") or action.get("url")
-                    if new_url:
-                        domain = urlparse(new_url).netloc
-                        if domain:
-                            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+                url = action.get("newUrl") or action.get("url")
+                if url:
+                    domain = urlparse(url).netloc
+                    if domain:
+                        domain_counts[domain] = domain_counts.get(domain, 0) + 1
 
-            final_session_name = "recording"
             if domain_counts:
                 most_common = max(domain_counts, key=domain_counts.get)
-                final_session_name = sanitize_filename(most_common)
+                fallback_session_name = sanitize_filename(most_common)
 
-            base_output_dir = os.path.join(os.getcwd(), final_session_name)
-            output_dir = base_output_dir
-            idx = 1
-            while os.path.exists(output_dir):
-                output_dir = f"{base_output_dir}_{idx:02d}"
-                idx += 1
-
-            # Move the tmp directory to the final one
-            tmp_dir = str(config.OUTPUT_DIR)
-            if os.path.exists(tmp_dir) and tmp_dir != output_dir:
-                shutil.move(tmp_dir, output_dir)
-
-                # Update config globally so everything works smoothly later
-                from pathlib import Path
-
-                config.OUTPUT_DIR = Path(output_dir)
-                config.WORKSPACE_DIR = config.OUTPUT_DIR / "workspace"
-                config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
-                config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
-        else:
-            # We already have a named output directory, handle conflicts if it already exists from a previous run
-            pass  # (Conflict handling should ideally happen before recorder starts, but we use the existing dir for now)
-
+        # We will do all processing in the current OUTPUT_DIR (the tmp_dir)
         output_dir = str(config.OUTPUT_DIR)
         workspace_dir = str(config.WORKSPACE_DIR)
         session_dump_dir = os.path.join(workspace_dir, "session_dump")
@@ -474,7 +459,9 @@ def compile_workspace(
 
         detection_stats = {}
         if requests:
-            logger.info(f"Extracting {len(requests)} network requests and building transactions...")
+            events.log_info.send(
+                "recorder", text=f"Extracting {len(requests)} network requests and building transactions..."
+            )
             network_events, detection_stats = process_network_requests(requests, requests_dir, session_dump_dir)
             timeline_events.extend(network_events)
 
@@ -531,30 +518,52 @@ def compile_workspace(
         with open(os.path.join(session_dump_dir, "SUMMARY.json"), "w") as f:
             json.dump(make_serializable(summary), f, indent=2)
 
-        # Move the video file into the output directory before computing checksums
+        # Move the video file into the output directory before verifying
         final_video_path = os.path.join(session_dump_dir, "full_record.mp4")
         if os.path.exists(full_video_path):
             shutil.move(full_video_path, final_video_path)
 
-        # Compute checksums
-        checksums = calculate_checksum(output_dir)
+        # Verify files referenced in timeline exist
+        files_verified = verify_timeline_files(session_dump_dir, timeline_events)
 
         # Update and finalize metadata
         with open(os.path.join(output_dir, "session_metadata.json"), "w") as f:
-            final_meta = {"status": "completed", "checksums_sha256": checksums, "original_metadata": metadata}
+            final_meta = {"status": "completed", "files_verified": files_verified, "original_metadata": metadata}
             json.dump(make_serializable(final_meta), f, indent=2)
 
-        logger.info(f"[SUCCESS] Workspace compiled successfully at {output_dir}")
-        if MAGIKA_AVAILABLE:
-            logger.debug(f"Payloads detected: {detection_stats.get('request_detected', 0)}")
-            logger.debug(f"Bodies detected: {detection_stats.get('response_detected', 0)}")
-            logger.debug(f"MIME mismatches: {detection_stats.get('mismatches', 0)}")
+        # Determine final session name and rename output directory if needed
+        final_output_dir = output_dir
+        if not session_name:
+            analyzer_for_name = VideoActionAnalyzer()
+            ai_session_name = analyzer_for_name.generate_session_name(session_flow, fallback_session_name)
+
+            base_output_dir = os.path.join(os.getcwd(), ai_session_name)
+            final_output_dir = base_output_dir
+            idx = 1
+            while os.path.exists(final_output_dir):
+                final_output_dir = f"{base_output_dir}_{idx:02d}"
+                idx += 1
+
+            shutil.move(output_dir, final_output_dir)
+
+            # Update config globally so everything works smoothly later
+            from pathlib import Path
+
+            config.OUTPUT_DIR = Path(final_output_dir)
+            config.WORKSPACE_DIR = config.OUTPUT_DIR / "workspace"
+            config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
+            config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
+
+            # Update the returned video path to reflect the new directory
+            final_video_path = os.path.join(final_output_dir, "workspace", "session_dump", "full_record.mp4")
+
+        events.log_info.send("recorder", text=f"[SUCCESS] Workspace compiled successfully at {final_output_dir}")
         return final_video_path, True
 
     except StopRequestedException as e:
-        logger.error(str(e))
+        events.log_error.send("recorder", text=str(e))
         return None, False
     except Exception as e:
-        logger.error(f"Workspace compilation failed: {e}")
-        logger.exception("Exception occurred")
+        events.log_error.send("recorder", text=f"Workspace compilation failed: {e}")
+        events.log_traceback.send("recorder")
         return None, False

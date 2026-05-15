@@ -117,7 +117,7 @@ def _preload():
             config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
             config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
 
-        config.ensure_output_dirs()
+        config.ensure_system_dirs()
 
         cmd = _peek_command()
 

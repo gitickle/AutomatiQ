@@ -8,7 +8,7 @@ import imageio_ffmpeg
 import litellm
 from pydantic import BaseModel, Field
 
-from .. import config
+from .. import config, events
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class VideoActionAnalyzer:
         it returns True the extraction is aborted early.
         """
         if not os.path.exists(video_path):
-            logger.error(f"Video file not found: {video_path}")
+            events.log_error.send("recorder", text=f"Video file not found: {video_path}")
             return []
 
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -98,11 +98,13 @@ class VideoActionAnalyzer:
             return base64_frames
 
         except subprocess.TimeoutExpired:
-            logger.error(f"FFmpeg frame extraction timed out after {self.SUBPROCESS_TIMEOUT}s for {video_path}")
+            events.log_error.send(
+                "recorder", text=f"FFmpeg frame extraction timed out after {self.SUBPROCESS_TIMEOUT}s for {video_path}"
+            )
             return []
         except Exception as e:
-            logger.error(f"FFmpeg frame extraction failed for {video_path}: {e}")
-            logger.exception("Exception occurred")
+            events.log_error.send("recorder", text=f"FFmpeg frame extraction failed for {video_path}: {e}")
+            events.log_traceback.send("recorder")
             return []
 
     @staticmethod
@@ -168,7 +170,7 @@ class VideoActionAnalyzer:
         for b64 in base64_frames:
             content.append({"type": "image_url", "image_url": {"url": b64}})
 
-        logger.info(f"Prompting Vision AI with {len(base64_frames)} frames...")
+        events.log_info.send("recorder", text=f"Prompting Vision AI with {len(base64_frames)} frames...")
 
         try:
             schema_json = json.dumps(VideoActionAnalysis.model_json_schema())
@@ -189,7 +191,7 @@ class VideoActionAnalyzer:
             for attempt in range(1, 4):  # Max 3 attempts
                 try:
                     response = litellm.completion(**kwargs)
-                    raw_text = response.choices[0].message.content.strip()
+                    raw_text = (getattr(response.choices[0].message, "content", None) or "").strip()
 
                     if raw_text.startswith("```"):
                         lines = raw_text.splitlines()
@@ -205,8 +207,12 @@ class VideoActionAnalyzer:
                     return analysis.model_dump()
                 except Exception as ve:
                     if attempt < 3:
-                        logger.warning(f"AI response validation failed (Attempt {attempt}/3): {ve}. Retrying...")
-                        kwargs["messages"].append({"role": "assistant", "content": raw_text})
+                        events.log_warn.send(
+                            "recorder", text=f"AI response validation failed (Attempt {attempt}/3): {ve}. Retrying..."
+                        )
+                        kwargs["messages"].append(
+                            {"role": "assistant", "content": raw_text if "raw_text" in locals() else ""}
+                        )
                         kwargs["messages"].append(
                             {
                                 "role": "user",
@@ -221,10 +227,88 @@ class VideoActionAnalyzer:
 
             if self._is_fatal(e):
                 self._ai_disabled = True
-                logger.error(f"LLM unreachable: {reason}")
-                logger.warning("Skipping AI analysis for remaining segments.")
+                events.log_error.send("recorder", text=f"LLM unreachable: {reason}")
+                events.log_warn.send("recorder", text="Skipping AI analysis for remaining segments.")
             else:
-                logger.error(f"AI analysis failed: {reason}")
+                events.log_error.send("recorder", text=f"AI analysis failed: {reason}")
 
-            logger.exception("Exception occurred")
+            events.log_traceback.send("recorder")
             return error_resp
+
+    def generate_session_name(self, session_flow: list[dict], fallback_name: str) -> str:
+        """Generates a concise folder name based on the recorded session flow summaries."""
+        if self._ai_disabled or not session_flow:
+            return fallback_name
+
+        try:
+            summaries = [item["summary"] for item in session_flow if "summary" in item]
+            if not summaries:
+                return fallback_name
+
+            prompt = (
+                "You are an AI assistant. I will provide a list of actions a user performed in a web browser.\n"
+                "Your task is to generate a short, descriptive folder name (max 3-4 words, using hyphens instead "
+                "of spaces, lowercased) that represents the overall goal or outcome of this session.\n"
+                "Do NOT include words like 'session', 'recording', 'test', 'video', or 'clip'.\n\n"
+                "Examples:\n"
+                "- login-to-github\n"
+                "- create-new-repo\n"
+                "- purchase-shoes-amazon\n\n"
+                "Here are the actions:\n" + "\n".join(f"- {s}" for s in summaries)
+            )
+
+            kwargs = dict(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=500,
+            )
+            if config.API_BASE:
+                kwargs["api_base"] = config.API_BASE
+
+            for attempt in range(1, 4):
+                try:
+                    response = litellm.completion(**kwargs)
+
+                    # Robust extraction of content
+                    content = None
+                    if hasattr(response, "choices") and len(response.choices) > 0:
+                        content = getattr(response.choices[0].message, "content", None)
+
+                    if not isinstance(content, str) or not content.strip():
+                        if attempt < 3:
+                            events.log_warn.send(
+                                "recorder", text=f"Empty AI response for session name (Attempt {attempt}/3). Retrying..."
+                            )
+                            continue
+                        events.log_warn.send(
+                            "recorder", text="Empty or non-string response from AI for session name, using fallback."
+                        )
+                        return fallback_name
+
+                    raw_text = content.strip().lower()
+
+                    import re
+
+                    clean_name = re.sub(r"[^\w\-]", "-", raw_text)
+                    clean_name = re.sub(r"-+", "-", clean_name).strip("-")
+                    return clean_name[:50] or fallback_name
+                except Exception as e:
+                    if self._is_fatal(e):
+                        events.log_warn.send(
+                            "recorder", text=f"Fatal LLM error during session naming: {self._extract_root_cause(e)}"
+                        )
+                        return fallback_name
+                    if attempt < 3:
+                        events.log_warn.send(
+                            "recorder", text=f"AI session naming failed (Attempt {attempt}/3): {e}. Retrying..."
+                        )
+                        continue
+                    events.log_warn.send("recorder", text=f"Could not generate AI session name, using fallback: {e}")
+                    events.log_traceback.send("recorder")
+                    return fallback_name
+
+            return fallback_name
+        except Exception as e:
+            events.log_warn.send("recorder", text=f"Unexpected error in AI session naming: {e}")
+            events.log_traceback.send("recorder")
+            return fallback_name
