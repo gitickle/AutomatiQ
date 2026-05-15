@@ -36,9 +36,11 @@ def extract_message(exc) -> str:
 
 
 def _known_models_for_provider(provider: str) -> list[str]:
-    """Return LiteLLM's known model names for a given provider prefix."""
+    """Return LiteLLM's known model names for a given provider prefix, stripped of the prefix."""
     try:
-        return sorted(litellm.models_by_provider.get(provider, []))
+        models = litellm.models_by_provider.get(provider, [])
+        prefix = f"{provider}/"
+        return sorted([m[len(prefix) :] if m.startswith(prefix) else m for m in models])
     except Exception:
         return []
 
