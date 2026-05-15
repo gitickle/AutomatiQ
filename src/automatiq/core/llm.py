@@ -97,6 +97,7 @@ def _is_model_error(exc: Exception) -> bool:
         "model not found",
         "unknown model",
         "unsupported model",
+        "model is not supported",
     ]
     return any(n in msg for n in needles)
 
