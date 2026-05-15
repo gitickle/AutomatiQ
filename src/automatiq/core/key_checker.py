@@ -11,7 +11,7 @@ import sys
 
 import litellm
 
-from . import config
+from . import config, events
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +31,10 @@ def _validate_model(model: str) -> bool:
 
     missing = result.get("missing_keys", [])
     if missing:
-        logger.error(f"Model '{model}' requires environment variables that are not set:")
+        events.log_error.send("key_checker", text=f"Model '{model}' requires environment variables that are not set:")
         for key in missing:
-            logger.debug(f"  {key}")
-        logger.debug("Set them in your .env file or export them before running.")
+            events.log_info.send("key_checker", text=f"  {key}")
+        events.log_info.send("key_checker", text="Set them in your .env file or export them before running.")
         return False
 
     return True
@@ -54,8 +54,28 @@ def check_api_keys(*models: str) -> None:
     # When a custom base URL is set the requests go to a user-controlled
     # endpoint — standard provider API keys are not required.
     if config.API_BASE:
-        logger.info(f"Custom endpoint ({config.API_BASE}) — skipping key validation.")
+        events.log_info.send("key_checker", text=f"Custom endpoint ({config.API_BASE}) — skipping key validation.")
         return
+
+    # GitHub Copilot uses OAuth device flow — no env key to validate
+    if any(m.startswith("github_copilot/") for m in models):
+        events.log_info.send(
+            "key_checker", text="GitHub Copilot detected — skipping key validation (uses OAuth device flow)."
+        )
+        return
+
+    # Catch obviously malformed model strings before hitting litellm
+    for m in models:
+        if "/" not in m:
+            events.log_error.send(
+                "key_checker",
+                text=(
+                    f"Invalid model string '{m}'. Expected format: 'provider/model-name' "
+                    f"(e.g. 'gemini/gemini-2.5-flash').\n"
+                    f"Check [models] agent in ~/.automatiq/config.toml."
+                ),
+            )
+            sys.exit(1)
 
     failed: list[str] = []
     seen: set[str] = set()
@@ -70,9 +90,9 @@ def check_api_keys(*models: str) -> None:
             failed.append(model)
 
     if failed:
-        logger.error(f"{len(failed)} model(s) failed key validation — cannot continue.")
+        events.log_error.send("key_checker", text=f"{len(failed)} model(s) failed key validation — cannot continue.")
         for m in failed:
-            logger.debug(f"  {m}")
+            events.log_info.send("key_checker", text=f"  {m}")
         sys.exit(1)
 
-    logger.info("[SUCCESS] API keys validated.")
+    # events.log_info.send("key_checker", text="[SUCCESS] API keys validated.")
