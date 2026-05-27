@@ -107,17 +107,17 @@ def success(msg: str) -> None:
 
 def action(msg: str) -> None:
     console.print(f"[action]\\[ACTION][/action] {escape(msg)}")
-    _log(logging.INFO, msg)
+    _log(logging.INFO, f"[ACTION] {msg}")
 
 
 def video(msg: str) -> None:
     console.print(f"[video]\\[VIDEO][/video] {escape(msg)}")
-    _log(logging.INFO, msg)
+    _log(logging.INFO, f"[VIDEO] {msg}")
 
 
 def ai(msg: str) -> None:
     console.print(f"[ai]\\[AI][/ai] {escape(msg)}")
-    _log(logging.INFO, msg)
+    _log(logging.INFO, f"[AI] {msg}")
 
 
 def think(text: str) -> None:

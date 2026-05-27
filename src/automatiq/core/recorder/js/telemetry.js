@@ -256,12 +256,13 @@
     // 1. Track Every Keypress (Restored)
     document.addEventListener('keydown', (e) => {
         if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
+        const target = (e.composedPath && e.composedPath()[0]) || e.target;
         emitAction({
             type: 'keypress',
             key: e.key,
             code: e.code,
-            tag: e.target.tagName,
-            value: e.target.value || ''
+            tag: target.tagName,
+            value: target.value || ''
         });
     }, true);
 
@@ -279,26 +280,14 @@
 
     // 3. Track Clicks (Upgraded with Locators & Delay)
     document.addEventListener('mousedown', (e) => {
-        // Explicit interactive roles to prevent capturing noise like [role="heading"]
-        const interactiveRoles = '[role="button"],[role="radio"],[role="checkbox"],[role="switch"],[role="tab"],[role="option"],[role="menuitem"],[role="link"],[role="treeitem"],[role="slider"],[role="spinbutton"],[role="textbox"],[role="searchbox"],[role="combobox"],[role="menuitemradio"],[role="menuitemcheckbox"]';
-        const interactiveSelector = `button, a, input, select, textarea, label, ${interactiveRoles}, [tabindex]:not([tabindex="-1"])`;
+        // composedPath()[0] pierces shadow DOM to get the real clicked element
+        const rawTarget = (e.composedPath && e.composedPath()[0]) || e.target;
+        if (!(rawTarget instanceof Element)) return;
 
-        let target = e.target.closest(interactiveSelector);
-
-        // Primitive UI Fallback (Catches generic divs styled as buttons)
-        if (!target) {
-            let current = e.target;
-            while (current && current !== document.body) {
-                const style = window.getComputedStyle(current);
-                if (style.cursor === 'pointer' || current.hasAttribute('onclick')) {
-                    target = current;
-                    break;
-                }
-                current = current.parentElement;
-            }
-        }
-
-        if (!target) return;
+        // Try to find the best interactive ancestor for locator quality,
+        // but ALWAYS fall back to rawTarget — never silently drop the click
+        const interactiveSelector = `button, a, input, select, textarea, label, [role], [tabindex]:not([tabindex="-1"]), [onclick]`;
+        const target = rawTarget.closest(interactiveSelector) || rawTarget;
 
         // Compute strict DOM coordinates immediately
         const cssPath = computeCSSSelector(target);

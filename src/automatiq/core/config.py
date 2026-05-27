@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-VERSION = "0.1.4a1"
+VERSION = "0.2.0"
 
 # ── Persistent user-level directory (~/.automatiq/) ──────────────────────────
 # Stores binaries, logs, history, and user preferences across sessions.
@@ -37,7 +37,7 @@ BLOCKLIST_DB = OUTPUT_DIR / "blocklist.db"
 
 # ── Models ───────────────────────────────────────────────────────────────────
 AGENT_MODEL = "gemini/gemini-3-flash-preview"
-RECORDER_AI_MODEL = "gemini/gemini-3.1-flash-lite-preview"
+RECORDER_AI_MODEL = "gemini/gemini-3.1-flash-lite"
 
 # Custom OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM).
 # When set, litellm sends requests to this URL instead of the default provider.
@@ -57,7 +57,7 @@ BLOCKLIST_SOURCES = {
 }
 
 # ── Agent tunables ───────────────────────────────────────────────────────────
-MAX_AGENT_STEPS = 60
+MAX_AGENT_STEPS = 100
 SANDBOX_TIMEOUT_SECONDS = 60
 
 # ── Banner ───────────────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ agent    = "gemini/gemini-3-flash-preview"
 
 # Vision model for video-clip analysis during recording.
 # Use a cheaper/faster model here to reduce cost.
-recorder = "gemini/gemini-3.1-flash-lite-preview"
+recorder = "gemini/gemini-3.1-flash-lite"
 
 # Custom OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, etc.).
 # When set, all LLM requests are routed to this URL.

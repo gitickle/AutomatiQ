@@ -64,7 +64,13 @@ class BrowserAgent:
         self.captured_actions = []
         self.active_map = {}
         self.orphan_extra_info = {}
-        self._streamed_bodies: dict[str, list[bytes]] = {}  # request_id -> list of raw chunks
+        # request_id (str) -> list[bytes]: chunks accumulated via streamResourceContent + DataReceived
+        self._streamed_bodies: dict[str, list[bytes]] = {}
+        # request_id (str) -> asyncio.Task: tracks in-flight _start_streaming tasks
+        self._streaming_tasks: dict[str, asyncio.Task] = {}
+        # All tab_session objects opened via target_created_handler, for cleanup
+        self._extra_tabs: list = []
+
         self.stats = {
             "total_requests": 0,
             "completed": 0,
@@ -111,6 +117,78 @@ class BrowserAgent:
         for k, v in extra_headers.items():
             current[k] = v
 
+    def _make_handlers(self, tab):
+        """
+        Return a set of CDP event handler coroutines bound to a specific tab.
+
+        Every handler that issues CDP commands (response_handler via
+        _start_streaming, and loading_finished_handler) needs to know which
+        tab the request originated from so commands go to the right session.
+        We close over `tab` here instead of using self.tab, which always
+        points to the main tab.
+        """
+
+        async def binding_handler(event: cdp.runtime.BindingCalled):
+            await self.binding_handler(event)
+
+        async def request_handler(event: cdp.network.RequestWillBeSent):
+            await self._request_handler(event, tab)
+
+        async def data_received_handler(event: cdp.network.DataReceived):
+            await self.data_received_handler(event)
+
+        async def response_handler(event: cdp.network.ResponseReceived):
+            await self._response_handler(event, tab)
+
+        async def loading_finished_handler(event: cdp.network.LoadingFinished):
+            await self._loading_finished_handler(event, tab)
+
+        async def loading_failed_handler(event: cdp.network.LoadingFailed):
+            await self._loading_failed_handler(event)
+
+        async def req_extra_info(event: cdp.network.RequestWillBeSentExtraInfo):
+            await self.req_extra_info(event)
+
+        async def res_extra_info(event: cdp.network.ResponseReceivedExtraInfo):
+            await self.res_extra_info(event)
+
+        return (
+            binding_handler,
+            request_handler,
+            data_received_handler,
+            response_handler,
+            loading_finished_handler,
+            loading_failed_handler,
+            req_extra_info,
+            res_extra_info,
+        )
+
+    def _register_network_handlers(self, tab_obj):
+        """Register all CDP network + runtime handlers on tab_obj, bound to that tab."""
+        (
+            binding_handler,
+            request_handler,
+            data_received_handler,
+            response_handler,
+            loading_finished_handler,
+            loading_failed_handler,
+            req_extra_info,
+            res_extra_info,
+        ) = self._make_handlers(tab_obj)
+
+        tab_obj.add_handler(cdp.runtime.BindingCalled, binding_handler)
+        tab_obj.add_handler(cdp.network.RequestWillBeSent, request_handler)
+        tab_obj.add_handler(cdp.network.DataReceived, data_received_handler)
+        tab_obj.add_handler(cdp.network.ResponseReceived, response_handler)
+        tab_obj.add_handler(cdp.network.LoadingFinished, loading_finished_handler)
+        tab_obj.add_handler(cdp.network.LoadingFailed, loading_failed_handler)
+        tab_obj.add_handler(cdp.network.RequestWillBeSentExtraInfo, req_extra_info)
+        tab_obj.add_handler(cdp.network.ResponseReceivedExtraInfo, res_extra_info)
+
+    # -------------------------------------------------------------------------
+    # Tab-independent handlers (no CDP commands issued)
+    # -------------------------------------------------------------------------
+
     async def binding_handler(self, event: cdp.runtime.BindingCalled):
         if event.name == "sendActionToPython":
             try:
@@ -127,15 +205,17 @@ class BrowserAgent:
                 elif action_type == "click":
                     events.log_info.send("recorder", text=f"[ACTION] click: {payload.get('text', '')[:50]}")
                 else:
+                    fallback_val = payload.get("value", payload.get("newUrl", payload.get("text", "")))
                     events.log_info.send(
                         "recorder",
-                        text=f"[ACTION] {action_type}: {payload.get('value', payload.get('newUrl', ''))[:50]}",
+                        text=f"[ACTION] {action_type}: {fallback_val[:50]}",
                     )
             except Exception as e:
                 events.log_error.send("recorder", text=f"Binding handler failed: {e}")
                 events.log_traceback.send("recorder")
 
-    async def request_handler(self, event: cdp.network.RequestWillBeSent):
+    async def _request_handler(self, event: cdp.network.RequestWillBeSent, tab):
+        """request_handler closed over the originating tab so it can be stored per-request."""
         if event.wall_time:
             self.ts_converter.calibrate(event.timestamp, event.wall_time)
 
@@ -152,6 +232,8 @@ class BrowserAgent:
             if event.redirect_response and not old_req["response_data"]:
                 rd = event.redirect_response.to_json()
                 old_req["response_data"] = {"status": rd["status"], "headers": rd.get("headers", {}), "body": None}
+            # Mark the old redirect entry as redirected so it doesn't linger as "pending"
+            old_req["request_state"] = "redirected"
             old_req.pop("_meta", None)
 
         unique_id = f"{event.request_id}_{uuid.uuid4().hex[:8]}"
@@ -173,6 +255,9 @@ class BrowserAgent:
             "response_timing": {},
             "request_state": "pending",
             "body_fetch_error": None,
+            # FIX (Bug 1): store originating tab so response/body handlers
+            # send CDP commands to the correct session, not always self.tab.
+            "_tab": tab,
         }
 
         if event.request_id in self.orphan_extra_info:
@@ -197,7 +282,12 @@ class BrowserAgent:
         self.active_map[event.request_id] = request_obj
 
     async def data_received_handler(self, event: cdp.network.DataReceived):
-        """Accumulate streamed response chunks for requests we're tracking."""
+        """Accumulate streamed response body chunks.
+
+        DataReceived.data is Optional[str] and base64-encoded (CDP wire spec).
+        It is only populated when streamResourceContent has been called for this
+        request — without it Chrome fires DataReceived with data=None.
+        """
         rid = str(event.request_id)
         if rid in self._streamed_bodies and event.data:
             try:
@@ -206,143 +296,175 @@ class BrowserAgent:
                 events.log_warn.send("recorder", text=f"Failed to decode streamed body chunk for request {rid}: {exc}")
                 events.log_traceback.send("recorder")
 
-    async def response_handler(self, event: cdp.network.ResponseReceived):
-        if event.request_id in self.active_map:
-            req = self.active_map[event.request_id]
-            req["request_state"] = "received"
-            req["response_timing"]["received_iso"] = self.ts_converter.to_iso8601(event.timestamp)
-            req["response_timing"]["received_unix"] = self.ts_converter.to_unix_timestamp(event.timestamp)
+    async def _response_handler(self, event: cdp.network.ResponseReceived, tab):
+        if event.request_id not in self.active_map:
+            return
 
-            if "timestamp_unix" in req:
-                duration_ms = (req["response_timing"]["received_unix"] - req["timestamp_unix"]) * 1000
-                req["response_timing"]["duration_ms"] = round(duration_ms, 2)
+        req = self.active_map[event.request_id]
+        req["request_state"] = "received"
+        req["response_timing"]["received_iso"] = self.ts_converter.to_iso8601(event.timestamp)
+        req["response_timing"]["received_unix"] = self.ts_converter.to_unix_timestamp(event.timestamp)
 
-            resp = event.response.to_json()
+        if "timestamp_unix" in req:
+            duration_ms = (req["response_timing"]["received_unix"] - req["timestamp_unix"]) * 1000
+            req["response_timing"]["duration_ms"] = round(duration_ms, 2)
 
-            if not req["response_data"]:
-                req["response_data"] = {
-                    "status": resp["status"],
-                    "headers": {},
-                    "body": None,
-                    "base64_encoded": False,
-                    "charset": resp.get("charset", "utf-8") or "utf-8",
-                    "mime_type": resp.get("mimeType", "unknown"),
-                    "from_disk_cache": resp.get("fromDiskCache", False),
-                    "from_service_worker": resp.get("fromServiceWorker", False),
-                    "from_prefetch_cache": resp.get("fromPrefetchCache", False),
-                }
-            else:
-                req["response_data"]["status"] = resp["status"]
-                req["response_data"]["mime_type"] = resp.get("mimeType", "unknown")
-                req["response_data"]["from_disk_cache"] = resp.get("fromDiskCache", False)
-                req["response_data"]["from_service_worker"] = resp.get("fromServiceWorker", False)
-                req["response_data"]["from_prefetch_cache"] = resp.get("fromPrefetchCache", False)
+        resp = event.response.to_json()
 
-            self.merge_headers(req, resp.get("headers", {}))
+        if not req["response_data"]:
+            req["response_data"] = {
+                "status": resp["status"],
+                "headers": {},
+                "body": None,
+                "base64_encoded": False,
+                "charset": resp.get("charset", "utf-8") or "utf-8",
+                "mime_type": resp.get("mimeType", "unknown"),
+                "from_disk_cache": resp.get("fromDiskCache", False),
+                "from_service_worker": resp.get("fromServiceWorker", False),
+                "from_prefetch_cache": resp.get("fromPrefetchCache", False),
+            }
+        else:
+            req["response_data"]["status"] = resp["status"]
+            req["response_data"]["mime_type"] = resp.get("mimeType", "unknown")
+            req["response_data"]["from_disk_cache"] = resp.get("fromDiskCache", False)
+            req["response_data"]["from_service_worker"] = resp.get("fromServiceWorker", False)
+            req["response_data"]["from_prefetch_cache"] = resp.get("fromPrefetchCache", False)
 
-            # Activate streaming for this request so DataReceived events
-            # carry actual body data — acts as a fallback when
-            # getResponseBody fails for large/evicted responses.
-            rid = str(event.request_id)
-            self._streamed_bodies[rid] = []
-            try:
-                buffered = await self.tab.send(cdp.network.stream_resource_content(request_id=event.request_id))
-                # buffered contains any data Chrome already received before
-                # we enabled streaming — store it as the first chunk
-                if buffered:
-                    self._streamed_bodies[rid].append(base64.b64decode(buffered))
-            except Exception as e:
-                error_str = str(e)
-                # If Chrome says it's already finished, silently ignore it.
-                if (
-                    "already finished loading" in error_str
-                    or "Request with the provided ID" in error_str
-                    or "No resource with given identifier" in error_str
-                ):
-                    pass
-                else:
-                    # If it's some OTHER weird error, we still want to know about it.
-                    events.log_warn.send("recorder", text=f"stream_resource_content failed: {e}")
-                    events.log_traceback.send("recorder")
+        self.merge_headers(req, resp.get("headers", {}))
 
-    async def loading_finished_handler(self, event: cdp.network.LoadingFinished):
-        if event.request_id in self.active_map:
-            req = self.active_map[event.request_id]
-            req["request_state"] = "finished"
-            self.stats["completed"] += 1
+        # FIX (Bug 1): use the tab this response came from, not self.tab
+        # FIX (v3 race): register slot SYNCHRONOUSLY before any await so
+        # DataReceived events accumulate immediately and LoadingFinished always
+        # finds the slot even if it fires before _start_streaming returns.
+        rid = str(event.request_id)
+        self._streamed_bodies[rid] = []
 
-            req["response_timing"]["finished_iso"] = self.ts_converter.to_iso8601(event.timestamp)
-            req["response_timing"]["finished_unix"] = self.ts_converter.to_unix_timestamp(event.timestamp)
+        task = asyncio.ensure_future(self._start_streaming(event.request_id, rid, tab))
+        # FIX (Bug 2): store task so loading_finished_handler can await it
+        # before checking the fallback chunks, preventing the race where
+        # LoadingFinished runs and pops an empty list before the pre-buffered
+        # chunk has been inserted by _start_streaming.
+        self._streaming_tasks[rid] = task
 
-            if "timestamp_unix" in req:
-                total_ms = (req["response_timing"]["finished_unix"] - req["timestamp_unix"]) * 1000
-                req["response_timing"]["total_duration_ms"] = round(total_ms, 2)
+    async def _start_streaming(self, request_id, rid: str, tab) -> None:
+        """Background task: enable streamResourceContent and store pre-buffered data.
 
-            if req["response_data"]:
-                status = req["response_data"].get("status", 0)
-                from_cache = (
-                    req["response_data"].get("from_disk_cache", False)
-                    or req["response_data"].get("from_service_worker", False)
-                    or req["response_data"].get("from_prefetch_cache", False)
+        FIX (Bug 1): accepts `tab` so the CDP command goes to the correct
+        session, not always the main tab.
+        """
+        try:
+            # stream_resource_content returns a base64-encoded str (bufferedData)
+            # representing data Chrome already received before we subscribed.
+            buffered: str = await tab.send(cdp.network.stream_resource_content(request_id=request_id))
+            # Only store if the slot still exists (request hasn't finished/failed yet)
+            if rid in self._streamed_bodies and buffered:
+                # Insert at position 0 — pre-buffered data comes before DataReceived chunks
+                self._streamed_bodies[rid].insert(0, base64.b64decode(buffered))
+        except Exception as e:
+            error_str = str(e)
+            if not any(
+                x in error_str
+                for x in (
+                    "already finished loading",
+                    "Request with the provided ID",
+                    "No resource with given identifier",
                 )
+            ):
+                events.log_warn.send("recorder", text=f"stream_resource_content failed: {e}")
+                events.log_traceback.send("recorder")
 
-                should_skip = False
-                skip_reason = None
+    async def _loading_finished_handler(self, event: cdp.network.LoadingFinished, tab):
+        if event.request_id not in self.active_map:
+            return
 
-                if 300 <= status < 400:
-                    should_skip = True
-                    skip_reason = f"Redirect status {status}"
-                    self.stats["body_skip_redirect"] += 1
-                elif status in (204, 205, 304):
-                    should_skip = True
-                    skip_reason = f"No content status {status}"
-                    self.stats["body_skip_no_content"] += 1
+        req = self.active_map[event.request_id]
+        req["request_state"] = "finished"
+        self.stats["completed"] += 1
 
-                if should_skip:
-                    req["body_fetch_error"] = skip_reason
-                else:
-                    body_captured = False
-                    # Primary: try getResponseBody (works for small/buffered responses)
+        req["response_timing"]["finished_iso"] = self.ts_converter.to_iso8601(event.timestamp)
+        req["response_timing"]["finished_unix"] = self.ts_converter.to_unix_timestamp(event.timestamp)
+
+        if "timestamp_unix" in req:
+            total_ms = (req["response_timing"]["finished_unix"] - req["timestamp_unix"]) * 1000
+            req["response_timing"]["total_duration_ms"] = round(total_ms, 2)
+
+        if req["response_data"]:
+            status = req["response_data"].get("status", 0)
+            from_cache = (
+                req["response_data"].get("from_disk_cache", False)
+                or req["response_data"].get("from_service_worker", False)
+                or req["response_data"].get("from_prefetch_cache", False)
+            )
+
+            should_skip = False
+            skip_reason = None
+
+            if 300 <= status < 400:
+                should_skip = True
+                skip_reason = f"Redirect status {status}"
+                self.stats["body_skip_redirect"] += 1
+            elif status in (204, 205, 304):
+                should_skip = True
+                skip_reason = f"No content status {status}"
+                self.stats["body_skip_no_content"] += 1
+
+            if should_skip:
+                req["body_fetch_error"] = skip_reason
+            else:
+                body_captured = False
+                rid = str(event.request_id)
+
+                # FIX (Bug 2): await the streaming task before checking fallback
+                # chunks. For fast responses, _start_streaming may not have run yet
+                # (pre-buffered chunk not inserted), so we wait up to 2s.
+                task = self._streaming_tasks.pop(rid, None)
+                if task and not task.done():
                     try:
-                        result = await self.tab.send(cdp.network.get_response_body(request_id=event.request_id))
-                        if isinstance(result, tuple):
-                            body, is_base64 = result
-                            req["response_data"]["body"] = body
-                            req["response_data"]["base64_encoded"] = is_base64
-                        else:
-                            req["response_data"]["body"] = result.body
-                            req["response_data"]["base64_encoded"] = result.base64_encoded
-                        self.stats["body_success"] += 1
+                        await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                    except (TimeoutError, Exception):
+                        pass
+
+                # Primary: getResponseBody — works for small/buffered responses.
+                # FIX (Bug 1): send to the correct tab, not always self.tab.
+                try:
+                    result = await tab.send(cdp.network.get_response_body(request_id=event.request_id))
+                    if isinstance(result, tuple):
+                        body, is_base64 = result
+                        req["response_data"]["body"] = body
+                        req["response_data"]["base64_encoded"] = is_base64
+                    else:
+                        req["response_data"]["body"] = result.body
+                        req["response_data"]["base64_encoded"] = result.base64_encoded
+                    self.stats["body_success"] += 1
+                    body_captured = True
+                except Exception as e:
+                    req["body_fetch_error"] = str(e)
+
+                # Fallback: reassemble from chunks collected via DataReceived.
+                # Chunks are raw bytes (already base64-decoded as they arrived).
+                if not body_captured and rid in self._streamed_bodies:
+                    chunks = self._streamed_bodies[rid]
+                    if chunks:
+                        raw = b"".join(chunks)
+                        req["response_data"]["body"] = base64.b64encode(raw).decode("ascii")
+                        req["response_data"]["base64_encoded"] = True
+                        req["body_fetch_error"] = None
+                        self.stats["body_from_stream"] += 1
                         body_captured = True
-                    except Exception as e:
-                        error_msg = str(e)
-                        req["body_fetch_error"] = error_msg
 
-                    # Fallback: use streamed body chunks if getResponseBody failed
-                    rid = str(event.request_id)
-                    if not body_captured and rid in self._streamed_bodies:
-                        chunks = self._streamed_bodies[rid]
-                        if chunks:
-                            raw = b"".join(chunks)
-                            req["response_data"]["body"] = base64.b64encode(raw).decode("ascii")
-                            req["response_data"]["base64_encoded"] = True
-                            req["body_fetch_error"] = None
-                            self.stats["body_from_stream"] += 1
-                            body_captured = True
-
-                    if not body_captured:
-                        if "No resource with given identifier" in (req.get("body_fetch_error") or ""):
-                            if from_cache:
-                                self.stats["body_skip_cached"] += 1
-                            else:
-                                self.stats["body_failed"] += 1
+                if not body_captured:
+                    if "No resource with given identifier" in (req.get("body_fetch_error") or ""):
+                        if from_cache:
+                            self.stats["body_skip_cached"] += 1
                         else:
                             self.stats["body_failed"] += 1
+                    else:
+                        self.stats["body_failed"] += 1
 
-            self._streamed_bodies.pop(str(event.request_id), None)
-            self.active_map.pop(event.request_id, None)
+        self._streamed_bodies.pop(str(event.request_id), None)
+        self.active_map.pop(event.request_id, None)
 
-    async def loading_failed_handler(self, event: cdp.network.LoadingFailed):
+    async def _loading_failed_handler(self, event: cdp.network.LoadingFailed):
         if event.request_id in self.active_map:
             req = self.active_map[event.request_id]
             req["request_state"] = "failed"
@@ -351,9 +473,16 @@ class BrowserAgent:
             req["canceled"] = event.canceled
             req["blocked_reason"] = str(event.blocked_reason) if event.blocked_reason else None
             self.stats["failed"] += 1
-            self._streamed_bodies.pop(str(event.request_id), None)
+            rid = str(event.request_id)
+            self._streamed_bodies.pop(rid, None)
+            # FIX (Bug 2): cancel and discard any in-flight streaming task
+            task = self._streaming_tasks.pop(rid, None)
+            if task and not task.done():
+                task.cancel()
             self.active_map.pop(event.request_id, None)
-            events.log_warn.send("recorder", text=f"Request failed: {req['url'][:60]} - {event.error_text}")
+            # Suppress log noise for user-initiated navigations (cancel is expected)
+            if not event.canceled:
+                events.log_warn.send("recorder", text=f"Request failed: {req['url'][:60]} - {event.error_text}")
 
     async def req_extra_info(self, event: cdp.network.RequestWillBeSentExtraInfo):
         cookies = [ac.to_json() for ac in event.associated_cookies]
@@ -406,7 +535,6 @@ class BrowserAgent:
             events.log_info.send("recorder", text=f"Successfully bound CDP to new tab: {target_info.target_id}")
 
             try:
-                # Now we can send CDP commands directly to this specific tab!
                 await tab_session.send(cdp.page.enable())
                 await tab_session.send(cdp.page.set_bypass_csp(enabled=True))
                 await tab_session.send(
@@ -415,31 +543,59 @@ class BrowserAgent:
                     )
                 )
                 await tab_session.send(cdp.runtime.enable())
-
                 await tab_session.send(cdp.runtime.add_binding(name="sendActionToPython"))
 
-                # Bind our telemetry and network handlers to this specific tab
-                tab_session.add_handler(cdp.runtime.BindingCalled, self.binding_handler)
-                tab_session.add_handler(cdp.network.RequestWillBeSent, self.request_handler)
-                tab_session.add_handler(cdp.network.ResponseReceived, self.response_handler)
-                tab_session.add_handler(cdp.network.DataReceived, self.data_received_handler)
-                tab_session.add_handler(cdp.network.LoadingFinished, self.loading_finished_handler)
-                tab_session.add_handler(cdp.network.LoadingFailed, self.loading_failed_handler)
-                tab_session.add_handler(cdp.network.RequestWillBeSentExtraInfo, self.req_extra_info)
-                tab_session.add_handler(cdp.network.ResponseReceivedExtraInfo, self.res_extra_info)
+                # FIX (Bug 1): use _register_network_handlers which closes over
+                # tab_session so all CDP commands go to this tab, not self.tab.
+                self._register_network_handlers(tab_session)
 
-                # Inject the JS scripts so actions in the new tab are also recorded
                 await tab_session.send(
                     cdp.page.add_script_to_evaluate_on_new_document(source=self.telemetry_script, run_immediately=True)
                 )
                 await tab_session.send(
                     cdp.page.add_script_to_evaluate_on_new_document(source=self.visuals_script, run_immediately=True)
                 )
+
+                # FIX (Bug 3): track extra tabs so _cleanup can remove their handlers
+                self._extra_tabs.append(tab_session)
+
             except Exception as exc:
                 events.log_warn.send(
                     "recorder", text=f"Failed to initialise CDP on new tab {target_info.target_id}: {exc}"
                 )
                 events.log_traceback.send("recorder")
+
+        elif target_info.type_ == "iframe":
+            # Cross-origin iframe: only need binding + telemetry script.
+            # Network events are already captured by the parent tab session.
+            await asyncio.sleep(0.2)
+            tab_session = None
+            for t in self.browser.targets:
+                if (
+                    getattr(t, "session_id", None) == event.session_id
+                    or getattr(t, "target_id", None) == target_info.target_id
+                ):
+                    tab_session = t
+                    break
+
+            if not tab_session:
+                return
+
+            try:
+                await tab_session.send(cdp.runtime.enable())
+                await tab_session.send(cdp.runtime.add_binding(name="sendActionToPython"))
+
+                async def _iframe_binding_handler(evt: cdp.runtime.BindingCalled):
+                    await self.binding_handler(evt)
+
+                tab_session.add_handler(cdp.runtime.BindingCalled, _iframe_binding_handler)
+
+                await tab_session.send(
+                    cdp.page.add_script_to_evaluate_on_new_document(source=self.telemetry_script, run_immediately=True)
+                )
+                self._extra_tabs.append(tab_session)
+            except Exception as exc:
+                events.log_warn.send("recorder", text=f"Failed to init CDP on iframe {target_info.target_id}: {exc}")
 
     async def run_session(self, url: str, stop_token=None) -> dict:
         if not self._load_scripts():
@@ -461,16 +617,11 @@ class BrowserAgent:
                 cdp.network.enable(max_resource_buffer_size=100 * 1024 * 1024, max_total_buffer_size=1000 * 1024 * 1024)
             )
             await self.tab.send(cdp.runtime.enable())
-
             await self.tab.send(cdp.runtime.add_binding(name="sendActionToPython"))
-            self.tab.add_handler(cdp.runtime.BindingCalled, self.binding_handler)
-            self.tab.add_handler(cdp.network.RequestWillBeSent, self.request_handler)
-            self.tab.add_handler(cdp.network.ResponseReceived, self.response_handler)
-            self.tab.add_handler(cdp.network.DataReceived, self.data_received_handler)
-            self.tab.add_handler(cdp.network.LoadingFinished, self.loading_finished_handler)
-            self.tab.add_handler(cdp.network.LoadingFailed, self.loading_failed_handler)
-            self.tab.add_handler(cdp.network.RequestWillBeSentExtraInfo, self.req_extra_info)
-            self.tab.add_handler(cdp.network.ResponseReceivedExtraInfo, self.res_extra_info)
+
+            # FIX (Bug 1): use _register_network_handlers for the main tab too,
+            # so all handlers close over self.tab consistently.
+            self._register_network_handlers(self.tab)
 
             await self.tab.send(
                 cdp.page.add_script_to_evaluate_on_new_document(source=self.telemetry_script, run_immediately=True)
@@ -509,7 +660,10 @@ class BrowserAgent:
         return await self._cleanup_and_build_report()
 
     async def _wait_for_pending_requests(self, timeout: float = 10.0, idle_time: float = 1.0) -> None:
-        """Wait until all tracked requests in active_map have resolved."""
+        """Wait until all tracked requests in active_map have resolved
+        (LoadingFinished/LoadingFailed), or until we've been network-idle
+        for `idle_time` seconds, whichever comes first.
+        Gives up entirely after `timeout` seconds."""
         if not self.active_map:
             return
 
@@ -573,8 +727,15 @@ class BrowserAgent:
 
                 self.stats["incomplete"] += 1
 
+        # FIX (Bug 3): remove handlers from the main tab AND all extra tabs
         if self.tab:
             self.tab.remove_handlers()
+        for extra_tab in self._extra_tabs:
+            try:
+                extra_tab.remove_handlers()
+            except Exception:
+                pass
+        self._extra_tabs.clear()
 
         try:
             if self.browser:
