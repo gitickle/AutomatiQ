@@ -78,7 +78,7 @@ _DEFAULT_CONFIG_TOML = """\
 [models]
 # LiteLLM model string for the investigator agent.
 # Examples: openai/gpt-4o, anthropic/claude-sonnet-4-20250514, gemini/gemini-2.0-flash
-agent    = "gemini/gemini-3-flash-preview"
+agent    = "gemini/gemini-3.5-flash"
 
 # Vision model for video-clip analysis during recording.
 # Use a cheaper/faster model here to reduce cost.
