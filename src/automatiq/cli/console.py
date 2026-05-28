@@ -6,7 +6,6 @@ This gives us consistent styling, color-coded log levels, and
 nice panels for agent output — all from a single shared Console.
 """
 
-import atexit
 import logging
 import os
 import signal
@@ -211,15 +210,7 @@ _active_listener = None
 
 
 def restore_terminal() -> None:
-    global _original_termios, _stdin_fd
-    if _original_termios is not None and _stdin_fd is not None:
-        try:
-            import termios
-
-            termios.tcsetattr(_stdin_fd, termios.TCSADRAIN, _original_termios)
-            termios.tcflush(_stdin_fd, termios.TCIFLUSH)
-        except Exception:
-            pass
+    pass
 
 
 class CLIListener:
@@ -355,7 +346,6 @@ def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken) -> CLI
             if stop_token.is_stopped():
                 # Second press: Force a hard exit
                 print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
-                restore_terminal()
                 os._exit(1)
             else:
                 stop_token.stop()
@@ -364,74 +354,43 @@ def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken) -> CLI
     except (ValueError, OSError):
         pass  # Fails gracefully if not running in the main thread
 
-    if sys.platform == "win32":
-        import msvcrt
+    def _listen():
+        try:
+            from prompt_toolkit.input import create_input
+            from prompt_toolkit.keys import Keys
 
-        def _listen():
-            while active.is_set():
-                if msvcrt.kbhit():
-                    key = msvcrt.getch()
-                    if key == b"\x1b":  # ESC
-                        cancel_token.cancel()
-                        while msvcrt.kbhit():
-                            msvcrt.getch()
-                    elif key == b"\x03":  # Ctrl+C
-                        if stop_token.is_stopped():
-                            print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
-                            os._exit(1)
-                        else:
-                            stop_token.stop()
-                        while msvcrt.kbhit():
-                            msvcrt.getch()
-                time.sleep(0.05)
-    else:
-        import select
-        import termios
-        import tty
+            inp = create_input()
+        except Exception:
+            return  # Fallback gracefully if prompt_toolkit fails to initialize
 
-        def _listen():
-            fd = sys.stdin.fileno()
-            global _stdin_fd, _original_termios
-            _stdin_fd = fd
-            _original_termios = termios.tcgetattr(fd)
+        while active.is_set():
+            if paused.is_set():
+                paused_ack.set()
+                while paused.is_set() and active.is_set():
+                    time.sleep(0.05)
+                if active.is_set():
+                    paused_ack.clear()
 
-            def _apply_cbreak_and_no_isig():
-                # Remove ISIG flag so Ctrl+C (\x03) comes through as a normal char
-                new = termios.tcgetattr(fd)
-                new[3] = new[3] & ~termios.ISIG
-                termios.tcsetattr(fd, termios.TCSANOW, new)
-                tty.setcbreak(fd)
-
-            _apply_cbreak_and_no_isig()
-            atexit.register(restore_terminal)
+            if not active.is_set():
+                break
 
             try:
-                while active.is_set():
-                    if paused.is_set():
-                        restore_terminal()
-                        paused_ack.set()
-                        while paused.is_set() and active.is_set():
-                            time.sleep(0.05)
-                        if active.is_set():
-                            paused_ack.clear()
-                            _apply_cbreak_and_no_isig()
-
-                    r, _, _ = select.select([sys.stdin], [], [], 0.05)
-                    if r:
-                        key = os.read(fd, 1)
-                        if key == b"\x1b":  # ESC
-                            cancel_token.cancel()
-                            termios.tcflush(fd, termios.TCIFLUSH)
-                        elif key == b"\x03":  # Ctrl+C
-                            if stop_token.is_stopped():
-                                print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
-                                restore_terminal()
-                                os._exit(1)
-                            else:
-                                stop_token.stop()
-                            termios.tcflush(fd, termios.TCIFLUSH)
-            finally:
-                restore_terminal()
+                # Enter raw mode only while actively listening
+                with inp.raw_mode():
+                    while active.is_set() and not paused.is_set():
+                        keys = inp.read_keys()
+                        for k in keys:
+                            if k.key == Keys.Escape:
+                                cancel_token.cancel()
+                            elif k.key == Keys.ControlC:
+                                if stop_token.is_stopped():
+                                    print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
+                                    os._exit(1)
+                                else:
+                                    stop_token.stop()
+                        time.sleep(0.05)
+            except Exception:
+                time.sleep(0.05)
 
     t = threading.Thread(target=_listen, daemon=True)
     t.start()
