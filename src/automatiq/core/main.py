@@ -14,6 +14,7 @@ import litellm
 from litellm.exceptions import (
     APIConnectionError,
     APIError,
+    NotFoundError,
     RateLimitError,
     ServiceUnavailableError,
     Timeout,
@@ -30,6 +31,7 @@ from .tools import AGENT_TOOLS, validate_tool_args
 
 logger = logging.getLogger(__name__)
 litellm.suppress_debug_info = True
+litellm.drop_params = True
 
 _preloaded_sandbox = None
 
@@ -259,6 +261,17 @@ def run_agent(input_queue: queue.Queue, cancel_token: CancelToken = None, target
                 except CancelRequestedException:
                     events.log_info.send("core", text="Cancelled by token. Returning to prompt.")
                     events.operation_cancelled.send("core")
+                    aborted = True
+                    break
+                except NotFoundError as exc:
+                    msg = extract_message(exc)
+                    events.log_error.send(
+                        "core",
+                        text=(
+                            f"Model '{config.AGENT_MODEL}' is not found or unsupported. "
+                            f"Please verify your config.toml file at ~/.automatiq/config.toml \nDetails: {msg}"
+                        ),
+                    )
                     aborted = True
                     break
                 except (

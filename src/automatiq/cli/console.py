@@ -265,8 +265,9 @@ class CLIListener:
 def get_prompt_toolkit_bindings():
     kb = KeyBindings()
 
-    # Alt+Enter or Esc then Enter inserts a newline
+    # Alt+Enter (escape, enter) or Ctrl+Enter/Ctrl+J (c-j) inserts a newline
     @kb.add("escape", "enter")
+    @kb.add("c-j")
     def _(event):
         event.current_buffer.insert_text("\n")
 

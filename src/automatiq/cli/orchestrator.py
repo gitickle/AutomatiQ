@@ -57,7 +57,7 @@ def handle_code_exec_start(sender, script=None, **kwargs):
     if script is not None:
         code_block(script)
     if _active_spinner is None:
-        _active_spinner = spinner("Running...")
+        _active_spinner = spinner("Running...(Press Esc to Stop)")
         _active_spinner.__enter__()
 
 
@@ -78,7 +78,7 @@ def handle_code_exec_end(sender, **kwargs):
 def handle_llm_request_start(sender, **kwargs):
     global _active_spinner
     if _active_spinner is None:
-        _active_spinner = spinner("Thinking...")
+        _active_spinner = spinner("Thinking...(Press Esc to Stop)")
         _active_spinner.__enter__()
 
 
@@ -118,7 +118,7 @@ def run_agent_cli(cancel_token: CancelToken = None, stop_token: StopToken = None
     def handle_prompt_request_start(sender, **kwargs):
         global _first_prompt
         if _first_prompt:
-            info("Type in q to quit | Esc to cancel processing")
+            info("Type in q to quit | Esc to cancel processing | Ctrl+Enter for newline")
             _first_prompt = False
 
         try:

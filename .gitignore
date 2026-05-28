@@ -41,3 +41,4 @@ nul
 test_cancel*.py
 test_interrupt*.py
 test_remote*.py
+Knowledge.md

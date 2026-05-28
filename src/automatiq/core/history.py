@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 from datetime import datetime
@@ -9,52 +10,146 @@ from . import config
 logger = logging.getLogger(__name__)
 
 
-def compress_history(messages: list[dict], cutoff_turn=20) -> list[dict]:
-    """Truncates massive tool outputs from older messages to save tokens."""
-    if len(messages) <= cutoff_turn:
-        return messages
-
+def compress_history(messages: list[dict], cutoff_turn=10) -> list[dict]:
+    """
+    Truncates massive tool outputs, strips deep thinking blocks, and manages
+    provider-specific signatures to save context window.
+    """
     compressed = []
-    # System prompt is index 0
-    # Everything before (len(messages) - cutoff_turn) gets compressed if it's a huge tool output
-    threshold_idx = len(messages) - cutoff_turn
+    # threshold_idx separates the recent active window from older messages
+    threshold_idx = max(0, len(messages) - cutoff_turn)
     cell_counter = 0
 
+    # 1. Determine provider from current agent configuration
+    agent_model = getattr(config, "AGENT_MODEL", "").lower()
+    provider = ""
+    if "/" in agent_model:
+        provider = agent_model.split("/")[0]
+
+    is_gemini = provider in ("gemini", "google", "vertex_ai") or "gemini" in agent_model
+    is_anthropic = provider in ("anthropic", "vertexai") or "claude" in agent_model
+
+    # Standard Google-recommended dummy signature to bypass validation on older turns
+    dummy_sig = base64.b64encode(b"skip_thought_signature_validator").decode()
+
+    # 2. First pass (Gemini only): Map tool call IDs containing '__thought__' to their dummy-sig versions
+    # for older messages so we keep the IDs perfectly matching in both assistant and tool messages.
+    id_mapping = {}
+    if is_gemini:
+        for i, msg in enumerate(messages):
+            if i < threshold_idx:
+                if msg.get("role") == "assistant" and "tool_calls" in msg:
+                    for tc in msg["tool_calls"]:
+                        tc_id = tc.get("id")
+                        if tc_id and "__thought__" in tc_id:
+                            base_id = tc_id.split("__thought__")[0]
+                            dummy_id = f"{base_id}__thought__{dummy_sig}"
+                            id_mapping[tc_id] = dummy_id
+
+    # 3. Second pass: Rebuild the messages list with provider-aware pruning
     for i, msg in enumerate(messages):
+        role = msg.get("role")
         is_exec = False
 
-        if msg.get("role") == "tool" and msg.get("name") == "execute_ipython":
+        if role == "tool" and msg.get("name") == "execute_ipython":
             content_str = str(msg.get("content", ""))
-
             is_failed_val = content_str.startswith("SYSTEM: Tool Validation Error") or content_str.startswith(
                 "SYSTEM: Validation failed repeatedly"
             )
             is_dup = content_str.startswith("SYSTEM: You have submitted the exact same description")
-
             if not is_failed_val and not is_dup:
                 cell_counter += 1
                 is_exec = True
 
-        if i < threshold_idx and msg.get("role") == "tool":
-            content_str = str(msg.get("content", ""))
+        # Process assistant messages
+        if role == "assistant":
+            # Strip deep thinking fields, reasoning_content, and provider_specific_fields
+            clean_msg = {
+                "role": "assistant",
+                "content": msg.get("content") or "",
+            }
 
-            # If the tool output is large, truncate it to save context window
-            if len(content_str) > 1000:
-                if msg.get("name") == "execute_ipython" and is_exec:
-                    trunc_msg = f"use `%view_output Cell_{cell_counter}` to view output of this cell"
-                else:
-                    trunc_msg = "<Truncated older tool output to save tokens>"
+            # Provider-aware thinking block preservation
+            if is_anthropic:
+                # For Anthropic, we MUST preserve 'thinking_blocks' to avoid 400 Bad Request
+                if "thinking_blocks" in msg:
+                    clean_msg["thinking_blocks"] = msg["thinking_blocks"]
 
-                compressed.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": msg.get("tool_call_id"),
-                        "name": msg.get("name"),
-                        "content": trunc_msg,
-                    }
-                )
-                continue
+            # Clean tool calls if present, mapping older IDs to dummy signatures (Gemini-only)
+            if "tool_calls" in msg:
+                clean_tool_calls = []
+                for tc in msg["tool_calls"]:
+                    tc_copy = dict(tc)
+                    tc_id = tc_copy.get("id")
+
+                    if is_gemini:
+                        if tc_id in id_mapping:
+                            tc_copy["id"] = id_mapping[tc_id]
+                        elif i < threshold_idx and tc_id and "__thought__" in tc_id:
+                            base_id = tc_id.split("__thought__")[0]
+                            tc_copy["id"] = f"{base_id}__thought__{dummy_sig}"
+
+                        # Clean signature inside provider fields for older turns
+                        if i < threshold_idx:
+                            tc_copy.pop("provider_specific_fields", None)
+                        else:
+                            if "provider_specific_fields" in tc_copy:
+                                tc_copy["provider_specific_fields"] = dict(tc_copy["provider_specific_fields"])
+                    else:
+                        # Non-Gemini models don't use thought signatures, pop metadata fields
+                        tc_copy.pop("provider_specific_fields", None)
+
+                    clean_tool_calls.append(tc_copy)
+                clean_msg["tool_calls"] = clean_tool_calls
+
+            compressed.append(clean_msg)
+            continue
+
+        # Process tool messages
+        if role == "tool":
+            tool_call_id = msg.get("tool_call_id")
+            clean_tool_call_id = tool_call_id
+
+            if is_gemini:
+                if tool_call_id in id_mapping:
+                    clean_tool_call_id = id_mapping[tool_call_id]
+                elif i < threshold_idx and tool_call_id and "__thought__" in tool_call_id:
+                    base_id = tool_call_id.split("__thought__")[0]
+                    clean_tool_call_id = f"{base_id}__thought__{dummy_sig}"
+
+            # If it's an older message and the output is large, truncate it
+            if i < threshold_idx:
+                content_str = str(msg.get("content", ""))
+                if len(content_str) > 1000:
+                    if msg.get("name") == "execute_ipython" and is_exec:
+                        trunc_msg = f"use `%view_output Cell_{cell_counter}` to view output of this cell"
+                    else:
+                        trunc_msg = "<Truncated older tool output to save tokens>"
+
+                    compressed.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": clean_tool_call_id,
+                            "name": msg.get("name"),
+                            "content": trunc_msg,
+                        }
+                    )
+                    continue
+
+            # For recent tool messages, keep the clean ID but full content
+            compressed.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": clean_tool_call_id,
+                    "name": msg.get("name"),
+                    "content": msg.get("content"),
+                }
+            )
+            continue
+
+        # For user/system messages, append as-is
         compressed.append(msg)
+
     return compressed
 
 

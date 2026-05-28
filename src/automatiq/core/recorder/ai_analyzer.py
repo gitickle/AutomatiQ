@@ -36,7 +36,7 @@ class VideoActionAnalyzer:
     SUBPROCESS_TIMEOUT = 60  # seconds — guard against hanging ffmpeg
 
     # Connection-level errors that should NOT be retried (DNS, network down, etc.)
-    _FATAL_EXC_TYPES = (litellm.APIConnectionError,)
+    _FATAL_EXC_TYPES = (litellm.APIConnectionError, litellm.NotFoundError)
 
     def __init__(self):
         self.model = config.RECORDER_AI_MODEL
