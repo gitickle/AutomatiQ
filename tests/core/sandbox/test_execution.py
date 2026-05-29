@@ -165,3 +165,38 @@ def test_rg_recursive_directory_search(sandbox: AgentSandbox):
     assert "Status: Success" in res
     assert "test_file.txt" in res
     assert "target_search_string_12345" in res
+
+
+def test_command_chunking_on_many_files(sandbox: AgentSandbox):
+    """Test that Windows command-line limit chunker handles massive glob expansion seamlessly"""
+    import os
+
+    subfolder = os.path.join(sandbox.working_dir, "requests")
+    os.makedirs(subfolder, exist_ok=True)
+
+    # Create 1,000 files with long path names to exceed the command-line limit
+    # To avoid truncating the test output, we only write the target string in 3 files,
+    # but still create and expand all 1,000 files to trigger the command-line limit.
+    print("Creating mock requests for chunking validation test...")
+    for i in range(1000):
+        folder_name = f"dir_bloat_index_{i:04d}_with_extremely_long_description_group"
+        folder_path = os.path.join(subfolder, folder_name)
+        os.makedirs(folder_path, exist_ok=True)
+        file_path = os.path.join(folder_path, "transaction.json")
+        with open(file_path, "w") as f:
+            if i in (0, 500, 999):
+                f.write('{"metadata": {"url": "chunk_target_string"}}')
+            else:
+                f.write('{"metadata": {"url": "dummy_content"}}')
+
+    # Execute the wildcard command that would normally fail on Windows due to the 32k limit
+    # The command line expanded length will be around 75,000+ characters.
+    res = sandbox.execute('!rg "chunk_target_string" requests/*/transaction.json')
+
+    # Verify execution succeeds and matches were found
+    assert "Status: Success" in res
+    assert "rg: not found" not in res.lower()
+    # Check that it actually processed files from different chunks (e.g., index 0000, 0500 and 0999)
+    assert "dir_bloat_index_0000" in res
+    assert "dir_bloat_index_0500" in res
+    assert "dir_bloat_index_0999" in res

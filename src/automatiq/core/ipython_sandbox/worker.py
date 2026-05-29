@@ -201,70 +201,157 @@ def ipython_worker(
     shell.displayhook.write_format_data = lambda *args, **kwargs: None
 
     if sys.platform == "win32":
+        import glob
+        import shlex
         import subprocess
 
         from IPython.utils.text import SList
 
         sh_path = os.path.join(os.environ["PATH"], "sh.exe") if "PATH" in os.environ else "sh.exe"
 
+        def chunk_windows_command(cmd):
+            try:
+                args = shlex.split(cmd, posix=False)
+            except Exception:
+                return [cmd]
+
+            wildcard_indices = [i for i, arg in enumerate(args) if "*" in arg or "?" in arg]
+            if not wildcard_indices:
+                return [cmd]
+
+            first_wc = wildcard_indices[0]
+            last_wc = wildcard_indices[-1]
+
+            prefix_args = [args[i] for i in range(first_wc)]
+            suffix_args = [args[i] for i in range(last_wc + 1, len(args))]
+
+            chunkable_files = []
+            has_expanded = False
+            for i in range(first_wc, last_wc + 1):
+                arg = args[i]
+                clean_arg = arg
+                if (arg.startswith('"') and arg.endswith('"')) or (arg.startswith("'") and arg.endswith("'")):
+                    clean_arg = arg[1:-1]
+                files = glob.glob(clean_arg)
+                if files:
+                    has_expanded = True
+                    for f in files:
+                        f_norm = f.replace("\\", "/")
+                        if " " in f_norm:
+                            chunkable_files.append(f'"{f_norm}"')
+                        else:
+                            chunkable_files.append(f_norm)
+                else:
+                    chunkable_files.append(arg)
+
+            if not has_expanded:
+                return [cmd]
+
+            prefix_str = " ".join(prefix_args)
+            suffix_str = " ".join(suffix_args)
+            base_len = len(prefix_str) + len(suffix_str) + 2
+
+            chunks = []
+            current_chunk = []
+            current_len = base_len
+
+            for f in chunkable_files:
+                item_len = len(f) + 1
+                if current_len + item_len > 30000:
+                    if current_chunk:
+                        chunks.append(current_chunk)
+                        current_chunk = []
+                        current_len = base_len
+                current_chunk.append(f)
+                current_len += item_len
+            if current_chunk:
+                chunks.append(current_chunk)
+
+            cmd_strings = []
+            for chunk in chunks:
+                parts = []
+                if prefix_args:
+                    parts.append(prefix_str)
+                parts.append(" ".join(chunk))
+                if suffix_args:
+                    parts.append(suffix_str)
+                cmd_strings.append(" ".join(parts))
+
+            return cmd_strings
+
         def busybox_system(cmd):
             cmd = shell.var_expand(cmd, depth=1)
-            p = subprocess.Popen([sh_path, "-c", cmd], stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL)
-            try:
-                while p.poll() is None:
-                    time.sleep(0.05)
-                shell.user_ns["_exit_code"] = p.returncode
-            except KeyboardInterrupt:
-                p.terminate()
+            cmds = chunk_windows_command(cmd)
+            exit_codes = []
+            for cmd_str in cmds:
+                p = subprocess.Popen(
+                    [sh_path, "-c", cmd_str],
+                    stdout=sys.stdout,
+                    stderr=sys.stderr,
+                    stdin=subprocess.DEVNULL,
+                )
                 try:
-                    p.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                raise
+                    while p.poll() is None:
+                        time.sleep(0.05)
+                    exit_codes.append(p.returncode)
+                except KeyboardInterrupt:
+                    p.terminate()
+                    try:
+                        p.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                    raise
+            shell.user_ns["_exit_code"] = next((code for code in exit_codes if code != 0), 0)
 
         def busybox_getoutput(cmd, split=True, depth=0):
             cmd = shell.var_expand(cmd, depth=depth + 1)
-            out = ""
-            try:
-                p = subprocess.Popen(
-                    [sh_path, "-c", cmd],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    stdin=subprocess.DEVNULL,
-                )
-                out_chunks = []
-
-                def reader():
-                    try:
-                        while True:
-                            chunk = p.stdout.read(1024)
-                            if not chunk:
-                                break
-                            out_chunks.append(chunk)
-                    except Exception:
-                        pass
-
-                t_read = threading.Thread(target=reader, daemon=True)
-                t_read.start()
-                while p.poll() is None:
-                    time.sleep(0.05)
-                t_read.join(timeout=0.2)
-                out = "".join(out_chunks)
-            except KeyboardInterrupt:
-                p.terminate()
+            cmds = chunk_windows_command(cmd)
+            all_outputs = []
+            for cmd_str in cmds:
+                out = ""
                 try:
-                    p.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                raise
-            except Exception as e:
-                out = str(e)
+                    p = subprocess.Popen(
+                        [sh_path, "-c", cmd_str],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        stdin=subprocess.DEVNULL,
+                    )
+                    out_chunks = []
+
+                    def reader(proc=p, chunks=out_chunks):
+                        try:
+                            while True:
+                                chunk = proc.stdout.read(1024)
+                                if not chunk:
+                                    break
+                                chunks.append(chunk)
+                        except Exception:
+                            pass
+
+                    t_read = threading.Thread(target=reader, daemon=True)
+                    t_read.start()
+                    while p.poll() is None:
+                        time.sleep(0.05)
+                    t_read.join(timeout=0.2)
+                    out = "".join(out_chunks)
+                except KeyboardInterrupt:
+                    p.terminate()
+                    try:
+                        p.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                    raise
+                except Exception as e:
+                    out = str(e)
+                all_outputs.append(out)
+
+            combined_out = "".join(all_outputs)
             if split:
-                return SList(out.splitlines())
-            return out
+                return SList(combined_out.splitlines())
+            return combined_out
 
         if os.path.exists(sh_path):
             shell.system = busybox_system
