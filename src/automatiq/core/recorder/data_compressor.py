@@ -337,11 +337,7 @@ def process_network_requests(
                 if res_data and res_data.get("body_file"):
                     body_file_path = os.path.join(temp_data_dir, res_data["body_file"])
                     if os.path.exists(body_file_path):
-                        ext = response_detection.get("extension", "bin") if response_detection else "bin"
-                        dest_path = os.path.join(req_root, f"res_body.{ext}")
-                        shutil.copy(body_file_path, dest_path)
-
-                        # Also detect content type if not already done, by reading the first chunk
+                        # Detect content type FIRST so we use the correct extension when copying
                         if not response_detection and MAGIKA_AVAILABLE:
                             try:
                                 with open(body_file_path, "rb") as bf:
@@ -355,8 +351,6 @@ def process_network_requests(
                                             if declared_mime != detected_mime and declared_mime != "unknown":
                                                 detection_stats["mismatches"] += 1
                                                 transaction_data["response"]["mime_mismatch"] = True
-
-                                            # Write the updated transaction data
                                             with open(os.path.join(req_root, "transaction.json"), "w") as tf:
                                                 json.dump(make_serializable(transaction_data), tf, indent=2)
                             except Exception as magika_e:
@@ -364,6 +358,10 @@ def process_network_requests(
                                     "recorder",
                                     text=f"Could not detect content type of file {body_file_path}: {magika_e}",
                                 )
+
+                        ext = response_detection.get("extension", "bin") if response_detection else "bin"
+                        dest_path = os.path.join(req_root, f"res_body.{ext}")
+                        shutil.copy(body_file_path, dest_path)
 
                 timeline_requests.append(
                     {
@@ -395,12 +393,227 @@ def process_network_requests(
     return timeline_requests, detection_stats, stats
 
 
+# Opcode suffix mapping for WebSocket frame filenames.
+# Data frames (1=text, 2=binary) get no suffix; all others are tagged.
+_OPCODE_SUFFIXES = {
+    0: "continuation",
+    8: "close",
+    9: "ping",
+    10: "pong",
+}
+
+
+def _opcode_suffix(opcode: int) -> str:
+    """Returns the filename suffix for a given opcode, or empty string for data frames."""
+    if opcode in (1, 2):
+        return ""
+    if opcode in _OPCODE_SUFFIXES:
+        return f"_{_OPCODE_SUFFIXES[opcode]}"
+    return f"_opcode{opcode}"
+
+
+def _opcode_fallback_ext(opcode: int) -> str:
+    """Returns the fallback file extension when Magika is unavailable or fails."""
+    if opcode in (1, 8):
+        return "txt"
+    return "bin"
+
+
+def process_websocket_streams(connections_file: str, frames_file: str, ws_output_dir: str) -> tuple[list[dict], dict]:
+    """Processes WebSocket stream files into per-connection folders with Magika-tagged frame files.
+
+    Returns (timeline_events, ws_stats).
+    """
+    timeline_events = []
+    ws_stats = {"connections": 0, "frames": 0, "skipped": 0}
+
+    if not os.path.exists(connections_file):
+        return timeline_events, ws_stats
+
+    # Phase 1: Read connection lifecycle events and merge into per-connection state.
+    # Each lifecycle event (created, handshake_request, handshake_response, closed) is
+    # streamed separately by browser_agent.py. We merge them here by request_id.
+    connections = {}  # request_id -> {url, request_headers, response_headers, ...}
+
+    with open(connections_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                rid = record.get("request_id")
+                if not rid:
+                    continue
+                event_type = record.get("event")
+
+                if event_type == "created":
+                    connections[rid] = {
+                        "url": record.get("url", ""),
+                        "request_headers": {},
+                        "response_headers": {},
+                        "response_status": None,
+                        "created_iso": record.get("created_iso"),
+                        "closed_iso": None,
+                        "folder_name": None,
+                    }
+                elif event_type == "handshake_request":
+                    if rid not in connections:
+                        connections[rid] = {
+                            "url": "",
+                            "request_headers": {},
+                            "response_headers": {},
+                            "response_status": None,
+                            "created_iso": None,
+                            "closed_iso": None,
+                            "folder_name": None,
+                        }
+                    connections[rid]["request_headers"] = record.get("request_headers", {})
+                    if not connections[rid]["created_iso"]:
+                        connections[rid]["created_iso"] = record.get("created_iso")
+                elif event_type == "handshake_response":
+                    if rid not in connections:
+                        connections[rid] = {
+                            "url": "",
+                            "request_headers": {},
+                            "response_headers": {},
+                            "response_status": None,
+                            "created_iso": None,
+                            "closed_iso": None,
+                            "folder_name": None,
+                        }
+                    connections[rid]["response_headers"] = record.get("response_headers", {})
+                    connections[rid]["response_status"] = record.get("response_status")
+                    if not connections[rid]["created_iso"]:
+                        connections[rid]["created_iso"] = record.get("created_iso")
+                elif event_type == "closed":
+                    if rid in connections:
+                        connections[rid]["closed_iso"] = record.get("closed_iso")
+            except Exception as e:
+                events.log_error.send("recorder", text=f"Failed to parse WS connection record: {e}")
+                events.log_traceback.send("recorder")
+
+    # Reconstruct URL from Host header for connections that missed WebSocketCreated.
+    # Browsers block ws:// on HTTPS pages (mixed content), so wss:// is the safe default.
+    for conn in connections.values():
+        if not conn["url"] and conn["request_headers"]:
+            host = get_header_val(conn["request_headers"], "host")
+            if host:
+                conn["url"] = f"wss://{host}"
+
+    # Create folders and transaction.json for each connection
+    folder_paths = {}  # request_id -> ws_root path
+    for rid, conn in connections.items():
+        parsed_url = urlparse(conn["url"])
+        domain = parsed_url.netloc or "unknown"
+        folder_name = f"ws_{sanitize_filename(domain)}_{rid}"
+        ws_root = os.path.join(ws_output_dir, folder_name)
+        os.makedirs(ws_root, exist_ok=True)
+        conn["folder_name"] = folder_name
+        folder_paths[rid] = ws_root
+        ws_stats["connections"] += 1
+
+        transaction_data = {
+            "url": conn["url"],
+            "request_headers": conn["request_headers"],
+            "response_headers": conn["response_headers"],
+            "response_status": conn["response_status"],
+            "created_iso": conn["created_iso"],
+            "closed_iso": conn["closed_iso"],
+        }
+        with open(os.path.join(ws_root, "transaction.json"), "w") as f:
+            json.dump(make_serializable(transaction_data), f, indent=2)
+
+        # Add websocket_created to timeline
+        created_unix = None
+        if conn["created_iso"]:
+            try:
+                from datetime import datetime
+
+                dt = datetime.fromisoformat(conn["created_iso"])
+                created_unix = dt.timestamp()
+            except Exception:
+                pass
+
+        timeline_events.append(
+            {
+                "timestamp": created_unix or 0,
+                "timestamp_iso": conn["created_iso"],
+                "event_type": "websocket_created",
+                "url": conn["url"],
+                "folder": f"websockets/{folder_name}",
+            }
+        )
+
+        # Add websocket_closed to timeline if we have a close event
+        if conn["closed_iso"]:
+            closed_unix = None
+            try:
+                from datetime import datetime
+
+                dt = datetime.fromisoformat(conn["closed_iso"])
+                closed_unix = dt.timestamp()
+            except Exception:
+                pass
+
+            timeline_events.append(
+                {
+                    "timestamp": closed_unix or 0,
+                    "timestamp_iso": conn["closed_iso"],
+                    "event_type": "websocket_closed",
+                    "url": conn["url"],
+                    "folder": f"websockets/{folder_name}",
+                }
+            )
+
+    # Phase 2: Read frame events and write each frame to disk with Magika-tagged extension
+    if os.path.exists(frames_file):
+        with open(frames_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    frame = json.loads(line)
+                    rid = frame.get("request_id")
+                    if rid not in folder_paths:
+                        ws_stats["skipped"] += 1
+                        continue
+
+                    ws_root = folder_paths[rid]
+                    seq = frame.get("seq", 0)
+                    direction = frame.get("direction", "unknown")
+                    delta_ms = frame.get("delta_ms", 0)
+                    opcode = frame.get("opcode", 1)
+                    payload = frame.get("payload", "")
+                    is_base64 = frame.get("is_base64", False)
+
+                    # Run Magika universally (text and binary)
+                    detection = detect_content_type(payload, is_base64=is_base64)
+                    if detection and detection.get("extension"):
+                        ext = detection["extension"]
+                    else:
+                        ext = _opcode_fallback_ext(opcode)
+
+                    suffix = _opcode_suffix(opcode)
+                    filename = f"{seq:05d}_{direction}_{delta_ms}ms{suffix}.{ext}"
+                    filepath = os.path.join(ws_root, filename)
+                    save_content(filepath, payload, is_base64=is_base64)
+                    ws_stats["frames"] += 1
+
+                except Exception as e:
+                    events.log_error.send("recorder", text=f"Failed to process WS frame: {e}")
+                    events.log_traceback.send("recorder")
+
+    return timeline_events, ws_stats
+
+
 def verify_timeline_files(session_dump_dir: str, timeline_events: list[dict]) -> bool:
     """Verifies that all files referenced in the timeline events exist on disk."""
     missing_files = []
 
     for event in timeline_events:
-        if event.get("event_type") == "network_request" and "folder" in event:
+        if event.get("event_type") in ("network_request", "websocket_created", "websocket_closed") and "folder" in event:
             # Only check that the core transaction file we created exists
             transaction_path = os.path.join(session_dump_dir, event["folder"], "transaction.json")
             if not os.path.exists(transaction_path):
@@ -528,6 +741,17 @@ def compile_workspace(
             )
             timeline_events.extend(network_events)
 
+        # Process WebSocket streams
+        ws_connections_path = os.path.join(temp_data_dir, "ws_connections.jsonl")
+        ws_frames_path = os.path.join(temp_data_dir, "ws_frames.jsonl")
+        ws_stats = {}
+        if os.path.exists(ws_connections_path):
+            events.log_info.send("recorder", text="Extracting WebSocket connections and frames...")
+            ws_output_dir = os.path.join(session_dump_dir, "websockets")
+            os.makedirs(ws_output_dir, exist_ok=True)
+            ws_timeline_events, ws_stats = process_websocket_streams(ws_connections_path, ws_frames_path, ws_output_dir)
+            timeline_events.extend(ws_timeline_events)
+
         timeline_events.sort(key=lambda x: x["timestamp"])
         with open(os.path.join(session_dump_dir, "timeline.json"), "w") as f:
             json.dump(make_serializable(timeline_events), f, indent=2)
@@ -558,6 +782,7 @@ def compile_workspace(
                 "with_auth": network_stats["with_auth"],
                 "with_cookies": network_stats["with_cookies"],
                 "content_detection": detection_stats if MAGIKA_AVAILABLE else "Magika not available",
+                "websockets": ws_stats if ws_stats else None,
             },
         }
 

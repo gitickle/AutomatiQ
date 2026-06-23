@@ -61,6 +61,10 @@ class BrowserAgent:
         os.makedirs(self._bodies_dir, exist_ok=True)
         self._actions_file = open(os.path.join(self._data_dir.name, "actions.jsonl"), "a", encoding="utf-8")
         self._requests_file = open(os.path.join(self._data_dir.name, "requests.jsonl"), "a", encoding="utf-8")
+        self._ws_connections_file = open(
+            os.path.join(self._data_dir.name, "ws_connections.jsonl"), "a", encoding="utf-8"
+        )
+        self._ws_frames_file = open(os.path.join(self._data_dir.name, "ws_frames.jsonl"), "a", encoding="utf-8")
         self._actions_count = 0
 
         self.browser = None
@@ -77,6 +81,9 @@ class BrowserAgent:
         self.active_map = {}
         self.orphan_extra_info = {}
 
+        # WebSocket tracking state
+        self.active_websockets = {}  # str(request_id) -> {"start_time", "sequence", "url"}
+
         # FIX: Central Tab Registry
         self.tabs = {}  # session_id -> {"tab": tab_session, "type": "page"|"iframe"}
 
@@ -92,6 +99,11 @@ class BrowserAgent:
             "body_skip_cached": 0,
             "body_from_stream": 0,
             "blocked_by_blocklist": 0,
+            "ws_connections": 0,
+            "ws_frames_sent": 0,
+            "ws_frames_received": 0,
+            "ws_frames_skipped": 0,
+            "ws_blocked_by_blocklist": 0,
         }
 
         self.telemetry_script = ""
@@ -177,6 +189,7 @@ class BrowserAgent:
             cdp.network.ResourceType.XHR,
             cdp.network.ResourceType.FETCH,
             cdp.network.ResourceType.SCRIPT,
+            cdp.network.ResourceType.WEB_SOCKET,
         ):
             self.stats["total_requests"] += 1
 
@@ -386,6 +399,189 @@ class BrowserAgent:
             self.orphan_extra_info[event.request_id]["raw_headers"] = headers
 
     # -------------------------------------------------------------------------
+    # WebSocket Handlers
+    #
+    # Each lifecycle event is streamed separately to ws_connections.jsonl.
+    # process_websocket_streams in data_compressor.py merges them at compile
+    # time. This avoids race conditions where WebSocketCreated fires before
+    # the handshake events have populated a shared stash.
+    #
+    # CDP event ordering:
+    #   WebSocketCreated
+    #   -> WebSocketWillSendHandshakeRequest
+    #   -> WebSocketHandshakeResponseReceived
+    #   -> WebSocketFrameSent / WebSocketFrameReceived
+    #   -> WebSocketClosed
+    # -------------------------------------------------------------------------
+
+    async def websocket_created_handler_for_tab(self, event: cdp.network.WebSocketCreated, session_id: str):
+        try:
+            rid = str(event.request_id)
+            url = event.url
+
+            if self.blocklist and self.blocklist.is_blocked_url(url):
+                self.stats["ws_blocked_by_blocklist"] += 1
+                return
+
+            # Set active_websockets BEFORE file I/O so frames are captured even if write fails.
+            # start_time will be updated by the handshake_request handler; if that event is
+            # missed, the first frame's timestamp becomes the baseline (delta = 0ms).
+            self.active_websockets[rid] = {
+                "start_time": None,
+                "sequence": 1,
+                "url": url,
+            }
+            self.stats["ws_connections"] += 1
+
+            record = {
+                "event": "created",
+                "request_id": rid,
+                "url": url,
+                "created_iso": self.ts_converter.current_iso8601(),
+            }
+            self._ws_connections_file.write(json.dumps(record) + "\n")
+            self._ws_connections_file.flush()
+        except Exception as e:
+            events.log_error.send("recorder", text=f"WebSocketCreated handler failed: {e}")
+            events.log_traceback.send("recorder")
+
+    async def websocket_handshake_request_handler_for_tab(
+        self, event: cdp.network.WebSocketWillSendHandshakeRequest, session_id: str
+    ):
+        try:
+            if event.wall_time:
+                self.ts_converter.calibrate(event.timestamp, event.wall_time)
+
+            rid = str(event.request_id)
+
+            # Fallback: if WebSocketCreated was missed (Network.enable not retroactive),
+            # create the active_websockets stub here so frames are still captured.
+            if rid not in self.active_websockets:
+                self.active_websockets[rid] = {
+                    "start_time": event.timestamp,
+                    "sequence": 1,
+                    "url": "",
+                }
+                self.stats["ws_connections"] += 1
+            else:
+                # Update start_time on the active connection so frame deltas are correct
+                self.active_websockets[rid]["start_time"] = event.timestamp
+
+            record = {
+                "event": "handshake_request",
+                "request_id": rid,
+                "request_headers": dict(event.request.headers),
+                "start_time": event.timestamp,
+                "created_iso": self.ts_converter.to_iso8601(event.timestamp),
+            }
+            self._ws_connections_file.write(json.dumps(record) + "\n")
+            self._ws_connections_file.flush()
+        except Exception as e:
+            events.log_error.send("recorder", text=f"WebSocketWillSendHandshakeRequest handler failed: {e}")
+            events.log_traceback.send("recorder")
+
+    async def websocket_handshake_response_handler_for_tab(
+        self, event: cdp.network.WebSocketHandshakeResponseReceived, session_id: str
+    ):
+        try:
+            rid = str(event.request_id)
+            resp = event.response
+
+            # Fallback: if both WebSocketCreated and handshake_request were missed,
+            # create the active_websockets stub here so frames are still captured.
+            if rid not in self.active_websockets:
+                self.active_websockets[rid] = {
+                    "start_time": event.timestamp,
+                    "sequence": 1,
+                    "url": "",
+                }
+                self.stats["ws_connections"] += 1
+
+            record = {
+                "event": "handshake_response",
+                "request_id": rid,
+                "response_headers": dict(resp.headers),
+                "response_status": resp.status,
+                "created_iso": self.ts_converter.to_iso8601(event.timestamp),
+            }
+            self._ws_connections_file.write(json.dumps(record) + "\n")
+            self._ws_connections_file.flush()
+        except Exception as e:
+            events.log_error.send("recorder", text=f"WebSocketHandshakeResponseReceived handler failed: {e}")
+            events.log_traceback.send("recorder")
+
+    async def _process_ws_frame(self, request_id, direction: str, timestamp: float, opcode: int, payload_data: str):
+        rid = str(request_id)
+        if rid not in self.active_websockets:
+            self.stats["ws_frames_skipped"] += 1
+            return
+
+        ws_state = self.active_websockets[rid]
+
+        # Fallback: if start_time was never set (missed handshake), use first frame as baseline
+        if ws_state["start_time"] is None:
+            ws_state["start_time"] = timestamp
+
+        delta_ms = int((timestamp - ws_state["start_time"]) * 1000)
+        seq = ws_state["sequence"]
+        is_base64 = opcode == 2
+
+        frame_record = {
+            "request_id": rid,
+            "seq": seq,
+            "direction": direction,
+            "delta_ms": delta_ms,
+            "opcode": opcode,
+            "payload": payload_data,
+            "is_base64": is_base64,
+        }
+        self._ws_frames_file.write(json.dumps(frame_record) + "\n")
+        self._ws_frames_file.flush()
+
+        ws_state["sequence"] += 1
+
+        if direction == "client":
+            self.stats["ws_frames_sent"] += 1
+        else:
+            self.stats["ws_frames_received"] += 1
+
+    async def websocket_frame_sent_handler_for_tab(self, event: cdp.network.WebSocketFrameSent, session_id: str):
+        try:
+            await self._process_ws_frame(
+                event.request_id, "client", event.timestamp, event.response.opcode, event.response.payload_data
+            )
+        except Exception as e:
+            events.log_error.send("recorder", text=f"WebSocketFrameSent handler failed: {e}")
+            events.log_traceback.send("recorder")
+
+    async def websocket_frame_received_handler_for_tab(self, event: cdp.network.WebSocketFrameReceived, session_id: str):
+        try:
+            await self._process_ws_frame(
+                event.request_id, "server", event.timestamp, event.response.opcode, event.response.payload_data
+            )
+        except Exception as e:
+            events.log_error.send("recorder", text=f"WebSocketFrameReceived handler failed: {e}")
+            events.log_traceback.send("recorder")
+
+    async def websocket_closed_handler_for_tab(self, event: cdp.network.WebSocketClosed, session_id: str):
+        try:
+            rid = str(event.request_id)
+
+            # Don't pop from active_websockets here — late-arriving frames after close
+            # are still captured with a valid sequence number. _cleanup_and_build_report
+            # clears active_websockets at session end.
+            record = {
+                "event": "closed",
+                "request_id": rid,
+                "closed_iso": self.ts_converter.to_iso8601(event.timestamp),
+            }
+            self._ws_connections_file.write(json.dumps(record) + "\n")
+            self._ws_connections_file.flush()
+        except Exception as e:
+            events.log_error.send("recorder", text=f"WebSocketClosed handler failed: {e}")
+            events.log_traceback.send("recorder")
+
+    # -------------------------------------------------------------------------
     # Target Attach and Session Run
     # -------------------------------------------------------------------------
 
@@ -426,21 +622,52 @@ class BrowserAgent:
             tab_session.add_handler(cdp.network.RequestWillBeSentExtraInfo, on_req_extra)
             tab_session.add_handler(cdp.network.ResponseReceivedExtraInfo, on_res_extra)
 
+            async def on_ws_created(e):
+                await self.websocket_created_handler_for_tab(e, session_id)
+
+            async def on_ws_sent(e):
+                await self.websocket_frame_sent_handler_for_tab(e, session_id)
+
+            async def on_ws_received(e):
+                await self.websocket_frame_received_handler_for_tab(e, session_id)
+
+            async def on_ws_closed(e):
+                await self.websocket_closed_handler_for_tab(e, session_id)
+
+            tab_session.add_handler(cdp.network.WebSocketCreated, on_ws_created)
+            tab_session.add_handler(cdp.network.WebSocketFrameSent, on_ws_sent)
+            tab_session.add_handler(cdp.network.WebSocketFrameReceived, on_ws_received)
+            tab_session.add_handler(cdp.network.WebSocketClosed, on_ws_closed)
+
+            async def on_ws_handshake_req(e):
+                await self.websocket_handshake_request_handler_for_tab(e, session_id)
+
+            async def on_ws_handshake_res(e):
+                await self.websocket_handshake_response_handler_for_tab(e, session_id)
+
+            tab_session.add_handler(cdp.network.WebSocketWillSendHandshakeRequest, on_ws_handshake_req)
+            tab_session.add_handler(cdp.network.WebSocketHandshakeResponseReceived, on_ws_handshake_res)
+
     async def target_created_handler(self, event: cdp.target.AttachedToTarget):
         target_info = event.target_info
 
         if target_info.type_ == "page":
             events.log_info.send("recorder", text=f"New Tab/Window Opened: {target_info.url}")
-            await asyncio.sleep(0.5)
 
+            # Low-latency rapid polling for the newly created tab session object.
+            # Avoids a fixed 500ms blind window where critical network events might be lost.
             tab_session = None
-            for t in self.browser.targets:
-                if (
-                    getattr(t, "session_id", None) == event.session_id
-                    or getattr(t, "target_id", None) == target_info.target_id
-                ):
-                    tab_session = t
+            for _ in range(100):  # max 1.0s wait
+                for t in self.browser.targets:
+                    if (
+                        getattr(t, "session_id", None) == event.session_id
+                        or getattr(t, "target_id", None) == target_info.target_id
+                    ):
+                        tab_session = t
+                        break
+                if tab_session:
                     break
+                await asyncio.sleep(0.01)
 
             if not tab_session:
                 events.log_warn.send("recorder", text=f"Could not resolve Tab object for session {event.session_id}")
@@ -450,13 +677,15 @@ class BrowserAgent:
             events.log_info.send("recorder", text=f"Successfully bound CDP to new tab: {target_info.target_id}")
 
             try:
-                await tab_session.send(cdp.page.enable())
-                await tab_session.send(cdp.page.set_bypass_csp(enabled=True))
+                # Prioritize network domain to catch immediate websocket handshakes and HTTP requests
                 await tab_session.send(
                     cdp.network.enable(
                         max_resource_buffer_size=100 * 1024 * 1024, max_total_buffer_size=1000 * 1024 * 1024
                     )
                 )
+                await tab_session.send(cdp.page.enable())
+                await tab_session.send(cdp.page.set_bypass_csp(enabled=True))
+
                 await tab_session.send(cdp.runtime.enable())
                 await tab_session.send(cdp.runtime.add_binding(name="sendActionToPython"))
 
@@ -484,15 +713,18 @@ class BrowserAgent:
             if self.blocklist and self.blocklist.is_blocked_url(target_info.url):
                 return
 
-            await asyncio.sleep(0.1)
             tab_session = None
-            for t in self.browser.targets:
-                if (
-                    getattr(t, "session_id", None) == event.session_id
-                    or getattr(t, "target_id", None) == target_info.target_id
-                ):
-                    tab_session = t
+            for _ in range(100):  # max 1.0s wait
+                for t in self.browser.targets:
+                    if (
+                        getattr(t, "session_id", None) == event.session_id
+                        or getattr(t, "target_id", None) == target_info.target_id
+                    ):
+                        tab_session = t
+                        break
+                if tab_session:
                     break
+                await asyncio.sleep(0.01)
 
             if not tab_session:
                 return
@@ -539,11 +771,13 @@ class BrowserAgent:
             self.tabs[main_session_id] = {"tab": self.tab, "type": "page", "url": "about:blank"}
 
             events.log_info.send("recorder", text="Enabling CDP domains and binding handlers...")
-            await self.tab.send(cdp.page.enable())
-            await self.tab.send(cdp.page.set_bypass_csp(enabled=True))
+
+            # Prioritize network domain
             await self.tab.send(
                 cdp.network.enable(max_resource_buffer_size=100 * 1024 * 1024, max_total_buffer_size=1000 * 1024 * 1024)
             )
+            await self.tab.send(cdp.page.enable())
+            await self.tab.send(cdp.page.set_bypass_csp(enabled=True))
             await self.tab.send(cdp.runtime.enable())
             await self.tab.send(cdp.runtime.add_binding(name="sendActionToPython"))
 
@@ -626,10 +860,25 @@ class BrowserAgent:
             self._requests_file.flush()
             self.active_map.clear()
 
+        # Write synthetic "closed" events for WebSocket connections that didn't close cleanly
+        if self.active_websockets:
+            closed_iso = self.ts_converter.current_iso8601()
+            for ws_request_id in self.active_websockets:
+                closed_record = {
+                    "event": "closed",
+                    "request_id": str(ws_request_id),
+                    "closed_iso": closed_iso,
+                }
+                self._ws_connections_file.write(json.dumps(closed_record) + "\n")
+            self._ws_connections_file.flush()
+            self.active_websockets.clear()
+
         # Close stream files
         try:
             self._actions_file.close()
             self._requests_file.close()
+            self._ws_connections_file.close()
+            self._ws_frames_file.close()
         except Exception as e:
             events.log_error.send("recorder", text=f"Failed to close stream files: {e}")
             events.log_traceback.send("recorder")
@@ -680,6 +929,13 @@ class BrowserAgent:
                 "skip_redirect": self.stats["body_skip_redirect"],
                 "skip_no_content": self.stats["body_skip_no_content"],
                 "skip_cached": self.stats["body_skip_cached"],
+            },
+            "websocket_stats": {
+                "connections": self.stats["ws_connections"],
+                "frames_sent": self.stats["ws_frames_sent"],
+                "frames_received": self.stats["ws_frames_received"],
+                "frames_skipped": self.stats["ws_frames_skipped"],
+                "blocked_by_blocklist": self.stats["ws_blocked_by_blocklist"],
             },
             "session_crashed": self.session_crashed,
             "crash_timestamp": self.crash_timestamp,
