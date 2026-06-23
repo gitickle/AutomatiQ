@@ -60,6 +60,33 @@ automatiq run https://example.com
 
 That's it. Browse the site, press `Ctrl+C`, and the agent takes over.
 
+## Sponsor
+
+To run web automation and scraping scripts reliably, without hitting rate limits, IP bans, or CAPTCHA blocks due to high fraud scores.
+
+You need a high-quality Proxy Provider like [NodeMaven](https://go.nodemaven.com/automatiq)
+
+<p align="center">
+  <a href="https://go.nodemaven.com/automatiq">
+    <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="600">
+  </a>
+</p>
+
+[NodeMaven](https://go.nodemaven.com/automatiq) is the most reliable proxy provider, offering the highest quality IPs on the market. It is the ideal solution for automation, web scraping, SEO research, and social media management.
+
+**Why NodeMaven?**
+- **99.9% uptime**
+- **Sticky sessions** up to 7 days
+- **IP filtering:** all proxies have a fraud score <97%
+- **No KYC required**
+- **Cashback on traffic** - burn GB and earn up to 10% back
+
+🎁 **Special codes for our users, to your save money:**
+- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
+- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
+
+Maintaining this open-source project sustainably, is made possible thanks to our sponsor, **NodeMaven**.
+
 ## Usage Modes
 
 AutomatiQ offers two main ways to operate depending on your workflow:
