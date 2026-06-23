@@ -8,6 +8,7 @@ nice panels for agent output — all from a single shared Console.
 
 import logging
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -115,6 +116,51 @@ def rename_file_logger(new_base_name: str) -> None:
 def _log(level: int, msg: str) -> None:
     if _file_logger:
         _file_logger.log(level, msg)
+
+
+def save_crash_report(crash_timestamp: str | None = None, crash_error: str | None = None) -> str | None:
+    """Copy the session log to ./automatiq_crash_report.log in the current working directory.
+
+    Optionally appends crash timestamp and error information at the end of the file.
+    Returns the destination path on success, or None on failure.
+    """
+    log_path = None
+    for handler in _file_logger.handlers if _file_logger else []:
+        if isinstance(handler, logging.FileHandler):
+            log_path = handler.baseFilename
+            handler.flush()
+            break
+
+    if not log_path or not os.path.exists(log_path):
+        print("\n[ERROR] No session log found to save crash report.")
+        return None
+
+    dest_log = os.path.join(os.getcwd(), "automatiq_crash_report.log")
+    try:
+        shutil.copy2(log_path, dest_log)
+
+        if crash_timestamp or crash_error:
+            with open(dest_log, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write("AUTOMATIQ CRASH REPORT\n")
+                f.write("=" * 60 + "\n\n")
+                if crash_timestamp:
+                    f.write(f"Crash Timestamp : {crash_timestamp}\n")
+                if crash_error:
+                    f.write(f"Error           : {crash_error}\n")
+                f.write("\n" + "-" * 60 + "\n")
+                f.write(
+                    "NOTE: A crash occurred during the active recording session.\n"
+                    "The recording was still saved, but a few actions and\n"
+                    "requests may have been lost due to the abrupt termination.\n"
+                )
+                f.write("-" * 60 + "\n")
+
+        print(f"\n[INFO] Crash report log saved to {dest_log}")
+        return dest_log
+    except Exception as e:
+        print(f"\n[ERROR] Failed to save crash report log: {e}")
+        return None
 
 
 def info(msg: str) -> None:
@@ -352,7 +398,7 @@ def ask_session_name() -> str:
             _active_listener.resume()
 
 
-def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken) -> CLIListener | None:
+def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken, on_force_quit=None) -> CLIListener | None:
     if not sys.stdin.isatty():
         return None
 
@@ -368,6 +414,11 @@ def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken) -> CLI
             if stop_token.is_stopped():
                 # Second press: Force a hard exit
                 print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
+                if on_force_quit:
+                    try:
+                        on_force_quit()
+                    except Exception:
+                        pass
                 os._exit(1)
             else:
                 stop_token.stop()
@@ -407,6 +458,11 @@ def start_cli_listeners(cancel_token: CancelToken, stop_token: StopToken) -> CLI
                             elif k.key == Keys.ControlC:
                                 if stop_token.is_stopped():
                                     print("\n[ERROR] Force quit requested (Double Ctrl+C). Shutting down immediately.")
+                                    if on_force_quit:
+                                        try:
+                                            on_force_quit()
+                                        except Exception:
+                                            pass
                                     os._exit(1)
                                 else:
                                     stop_token.stop()

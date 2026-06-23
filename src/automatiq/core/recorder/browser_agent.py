@@ -67,6 +67,11 @@ class BrowserAgent:
         self.tab = None
         self.recording_start = None
 
+        # Crash tracking state
+        self.session_crashed = False
+        self.crash_timestamp = None
+        self.crash_error = None
+
         self.ts_converter = TimestampConverter()
 
         self.active_map = {}
@@ -578,6 +583,9 @@ class BrowserAgent:
             if stop_token:
                 stop_token.stop()
         except Exception as e:
+            self.session_crashed = True
+            self.crash_timestamp = datetime.now(UTC).isoformat()
+            self.crash_error = str(e)
             events.log_error.send("recorder", text=f"Session error: {e}")
             events.log_traceback.send("recorder")
 
@@ -673,6 +681,9 @@ class BrowserAgent:
                 "skip_no_content": self.stats["body_skip_no_content"],
                 "skip_cached": self.stats["body_skip_cached"],
             },
+            "session_crashed": self.session_crashed,
+            "crash_timestamp": self.crash_timestamp,
+            "crash_error": self.crash_error,
         }
 
         # Write metadata to the temp directory

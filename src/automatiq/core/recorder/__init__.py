@@ -80,9 +80,8 @@ def run_recording(
         from ...cli.console import console
 
         with console.status(
-            "[dim red]Recording Active 🔴 Press Ctrl+C to stop and save recording[/dim red]",
-            spinner="bouncingBar",
-            spinner_style="red",
+            "[green]Recording Active 🔴[/green] Press [blue]Ctrl+C[/blue] to stop and save recording\n",
+            spinner="earth",
         ):
             temp_data_dir = asyncio.run(_browser_agent.run_session(url=url, stop_token=stop_token))
 

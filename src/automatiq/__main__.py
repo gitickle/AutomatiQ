@@ -210,6 +210,7 @@ def cmd_record(args):
     from .core.key_checker import check_api_keys
 
     check_api_keys(config.AGENT_MODEL, config.RECORDER_AI_MODEL)
+    import tempfile
     from pathlib import Path
 
     from .cli.callbacks import get_cli_skip_callback
@@ -219,9 +220,14 @@ def cmd_record(args):
     from .core.recorder.data_compressor import sanitize_filename
 
     session_name = args.name if args.name is not None else ask_session_name()
-    output_dir_name = sanitize_filename(session_name) if session_name else ".tmp_recording"
 
-    config.OUTPUT_DIR = Path.cwd() / output_dir_name
+    if session_name:
+        output_dir_name = sanitize_filename(session_name)
+        config.OUTPUT_DIR = Path.cwd() / output_dir_name
+    else:
+        temp_dir = tempfile.mkdtemp(prefix="automatiq_recording_")
+        config.OUTPUT_DIR = Path(temp_dir)
+
     config.WORKSPACE_DIR = config.OUTPUT_DIR / "workspace"
     config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
     config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
@@ -229,7 +235,17 @@ def cmd_record(args):
 
     cancel_token = CancelToken()
     stop_token = StopToken()
-    monitor = start_cli_listeners(cancel_token, stop_token)
+
+    def handle_force_quit():
+        if not session_name:
+            import shutil
+
+            from .cli.console import save_crash_report
+
+            save_crash_report()
+            shutil.rmtree(config.OUTPUT_DIR, ignore_errors=True)
+
+    monitor = start_cli_listeners(cancel_token, stop_token, on_force_quit=handle_force_quit)
     try:
         success = run_recording(
             url=args.url,
@@ -248,6 +264,13 @@ def cmd_record(args):
     finally:
         if monitor:
             monitor.clear()
+
+    if not success and not session_name:
+        # Cleanup the temp directory if recording failed/aborted and we used a temp dir
+        import shutil
+
+        shutil.rmtree(config.OUTPUT_DIR, ignore_errors=True)
+
     if not success:
         error("Recording failed, aborted, or produced no output.")
         sys.exit(1)
@@ -267,7 +290,13 @@ def cmd_agent(args):
 
     cancel_token = CancelToken()
     stop_token = StopToken()
-    monitor = start_cli_listeners(cancel_token, stop_token)
+
+    def handle_force_quit():
+        from .cli.console import save_crash_report
+
+        save_crash_report()
+
+    monitor = start_cli_listeners(cancel_token, stop_token, on_force_quit=handle_force_quit)
     try:
         run_agent_cli(cancel_token=cancel_token, stop_token=stop_token, target=args.target)
     finally:
@@ -281,6 +310,7 @@ def cmd_run(args):
     from .core.key_checker import check_api_keys
 
     check_api_keys(config.AGENT_MODEL, config.RECORDER_AI_MODEL)
+    import tempfile
     from pathlib import Path
 
     from .cli.callbacks import get_cli_skip_callback
@@ -291,9 +321,14 @@ def cmd_run(args):
     from .core.recorder.data_compressor import sanitize_filename
 
     session_name = args.name if args.name is not None else ask_session_name()
-    output_dir_name = sanitize_filename(session_name) if session_name else ".tmp_recording"
 
-    config.OUTPUT_DIR = Path.cwd() / output_dir_name
+    if session_name:
+        output_dir_name = sanitize_filename(session_name)
+        config.OUTPUT_DIR = Path.cwd() / output_dir_name
+    else:
+        temp_dir = tempfile.mkdtemp(prefix="automatiq_recording_")
+        config.OUTPUT_DIR = Path(temp_dir)
+
     config.WORKSPACE_DIR = config.OUTPUT_DIR / "workspace"
     config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
     config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
@@ -301,7 +336,17 @@ def cmd_run(args):
 
     cancel_token = CancelToken()
     stop_token = StopToken()
-    monitor = start_cli_listeners(cancel_token, stop_token)
+
+    def handle_force_quit():
+        if not session_name:
+            import shutil
+
+            from .cli.console import save_crash_report
+
+            save_crash_report()
+            shutil.rmtree(config.OUTPUT_DIR, ignore_errors=True)
+
+    monitor = start_cli_listeners(cancel_token, stop_token, on_force_quit=handle_force_quit)
     try:
         success = run_recording(
             url=args.url,
@@ -320,6 +365,13 @@ def cmd_run(args):
     finally:
         if monitor:
             monitor.clear()
+
+    if not success and not session_name:
+        # Cleanup the temp directory if recording failed/aborted and we used a temp dir
+        import shutil
+
+        shutil.rmtree(config.OUTPUT_DIR, ignore_errors=True)
+
     if not success:
         error("Recording failed or aborted. Aborting agent launch.")
         sys.exit(1)
@@ -329,7 +381,13 @@ def cmd_run(args):
     cancel_token = CancelToken()
     # We will pass stop_token down to the agent if we want, but for now we reset it
     stop_token = StopToken()
-    monitor = start_cli_listeners(cancel_token, stop_token)
+
+    def handle_agent_force_quit():
+        from .cli.console import save_crash_report
+
+        save_crash_report()
+
+    monitor = start_cli_listeners(cancel_token, stop_token, on_force_quit=handle_agent_force_quit)
     try:
         run_agent_cli(cancel_token=cancel_token, stop_token=stop_token)
     except StopRequestedException:

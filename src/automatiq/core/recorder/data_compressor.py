@@ -595,10 +595,13 @@ def compile_workspace(
             # Update config globally so everything works smoothly later
             from pathlib import Path
 
-            config.OUTPUT_DIR = Path(final_output_dir)
-            config.WORKSPACE_DIR = config.OUTPUT_DIR / "workspace"
-            config.BLOCKLIST_DIR = config.OUTPUT_DIR / "blocklist"
-            config.BLOCKLIST_DB = config.OUTPUT_DIR / "blocklist.db"
+            # Import the config module dynamically using standard relative import to modify global state
+            from .. import config as global_config
+
+            global_config.OUTPUT_DIR = Path(final_output_dir)
+            global_config.WORKSPACE_DIR = global_config.OUTPUT_DIR / "workspace"
+            global_config.BLOCKLIST_DIR = global_config.OUTPUT_DIR / "blocklist"
+            global_config.BLOCKLIST_DB = global_config.OUTPUT_DIR / "blocklist.db"
 
             # Update the returned video path to reflect the new directory
             final_video_path = os.path.join(final_output_dir, "workspace", "session_dump", "full_record.mp4")
@@ -608,6 +611,29 @@ def compile_workspace(
             shutil.rmtree(temp_data_dir)
         except Exception as e:
             events.log_warn.send("recorder", text=f"Could not clean up temporary data directory {temp_data_dir}: {e}")
+
+        # --- Crash report handling ---
+        if metadata.get("session_crashed"):
+            crash_timestamp = metadata.get("crash_timestamp", "unknown")
+            crash_error = metadata.get("crash_error", "unknown")
+
+            from rich.panel import Panel
+
+            from ...cli.console import console, save_crash_report
+
+            save_crash_report(crash_timestamp=crash_timestamp, crash_error=crash_error)
+
+            console.print(
+                Panel(
+                    f"[bold yellow]A crash occurred during recording at[/bold yellow] [bold]{crash_timestamp}[/bold]\n\n"
+                    "[green]The recording was still saved.[/green] "
+                    "[dim]A few actions and requests may have been lost due to the abrupt termination.[/dim]\n\n"
+                    "[bold red]See automatiq_crash_report.log for details.[/bold red]",
+                    title="[bold red]CRASH DETECTED[/bold red]",
+                    border_style="red",
+                    padding=(1, 2),
+                )
+            )
 
         events.log_info.send("recorder", text=f"[SUCCESS] Workspace compiled successfully at {final_output_dir}")
 
