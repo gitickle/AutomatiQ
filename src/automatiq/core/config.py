@@ -36,7 +36,7 @@ BLOCKLIST_DIR = OUTPUT_DIR / "blocklist"
 BLOCKLIST_DB = OUTPUT_DIR / "blocklist.db"
 
 # ── Models ───────────────────────────────────────────────────────────────────
-AGENT_MODEL = "gemini/gemini-3-flash-preview"
+AGENT_MODEL = "gemini/gemini-3.5-flash"
 RECORDER_AI_MODEL = "gemini/gemini-3.1-flash-lite"
 
 # Custom OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM).

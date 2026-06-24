@@ -9,10 +9,8 @@ AutomatiQ is an open-source toolkit for automating and reverse-engineering the w
 [NodeMaven](https://go.nodemaven.com/automatiqagentmd) is the most reliable proxy provider with the Highest Quality IP on the market. It is the best solution for automation, web scraping, SEO research, and social media management.
 
 **Why NodeMaven?**
-- 99.9% uptime
-- Sticky sessions up to 7 days
-- IP filtering: all proxies have fraud score <97%
-- No KYC required
+- 99.9% uptime, sticky sessions up to 7 days
+- IP filtering: all proxies have fraud score <97%, no KYC required
 - Cashback on traffic - burn GB and earn up to 10% back
 
 **Special codes for AutomatiQ users:**
@@ -27,7 +25,7 @@ This is a standard Python repository.
 
 - `src/automatiq/cli/` — User-facing terminal interface and commands.
 - `src/automatiq/core/recorder/` — CDP engine, network interception, streaming to disk, and timeline compilation.
-- `src/automatiq/core/` — The internal LLM agent harness (`main.py`), sandbox, tools, and prompts.
+- `src/automatiq/core/` — The internal LLM agent harness (`main.py`), IPython sandbox, tools, and prompts.
 - `tests/` — Pytest suite.
 
 ## Important Commands
@@ -58,5 +56,4 @@ uv run automatiq
 
 ## Progressive Disclosure
 
-- For the project's long-term philosophy, roadmap, and core design principles, read `VISION.md`.
-- For internal agent prompts and behaviors, read `src/automatiq/core/prompts.py` and `src/automatiq/core/tools.py`.
+- For the project's long-term philosophy, roadmap, and core design principles, read `VISION.md`. For internal agent prompts and behaviors, read `src/automatiq/core/prompts.py` and `src/automatiq/core/tools.py`.

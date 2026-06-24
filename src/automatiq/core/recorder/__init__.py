@@ -1,6 +1,6 @@
 """Recorder sub-package — captures a full browser session (network + video + actions)
 and compiles it into a structured workspace dump for the agent.
-Usage: from automatiq.recorder import run_recording; run_recording("https://example.com")
+Usage: from automatiq.core.recorder import run_recording; run_recording("https://example.com")
 """
 
 import asyncio

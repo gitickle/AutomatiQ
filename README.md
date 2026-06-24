@@ -14,13 +14,13 @@
 <p align="center">
   <a href="https://github.com/StoneSteel27/AutomatiQ/actions/workflows/test.yaml"><img src="https://img.shields.io/github/actions/workflow/status/StoneSteel27/AutomatiQ/test.yaml?branch=main&label=Tests&style=flat-square&logo=github" alt="Test Status"></a>
   <a href="https://github.com/StoneSteel27/AutomatiQ/actions/workflows/lint.yaml"><img src="https://img.shields.io/github/actions/workflow/status/StoneSteel27/AutomatiQ/lint.yaml?branch=main&label=Lint&style=flat-square&logo=python&logoColor=white" alt="Lint Status"></a>
-  <img src="https://img.shields.io/pypi/dm/automatiq?style=flat-square&color=violet&cacheSeconds=0" alt="PyPI Downloads">
+  <img src="https://img.shields.io/pypi/v/automatiq?style=flat-square&color=blue&label=PyPI" alt="PyPI Version">
 </p>
 
 # AutomatiQ
 
 > [!Note]
-> **Alpha** ⟶ Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand why Automatiq exists and where it's headed.
+> **Alpha** ⟶ Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand why AutomatiQ exists and where it's headed.
 
 AutomatiQ watches you browse, then an AI agent reverse-engineers your session into a standalone Python automation/extraction script; no manual inspection needed.
 
@@ -30,19 +30,19 @@ AutomatiQ watches you browse, then an AI agent reverse-engineers your session in
   <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/process.svg" alt="AutomatiQ" width="800">
 </p>
 
-1. **Record (Browser Capture)** ⟶ Chrome is launched with CDP instrumentation. Every network request, response body, cookie, and user interaction (clicks, typing, navigation) is recorded with timestamps. Press `Ctrl+C` when you're done.
+1. **Record (Browser Capture)** ⟶ Chrome is launched with CDP instrumentation. Every network request, response body, cookie, WebSocket frame, and user interaction (clicks, typing, navigation) is recorded with timestamps. Press `Ctrl+C` when you're done.
 2. **Compile (Vision Analysis)** ⟶ The recording is split into per-action video clips. A vision LLM watches each clip and produces structured annotations (what was clicked, what changed, whether the action succeeded). Network requests are decoded, deduplicated, and structured into a workspace dump.
 3. **Agent (Sandbox Execution)** ⟶ An LLM investigator reads the workspace dump, experiments in an isolated Python/IPython environment, and iteratively produces a working script. It can test hypotheses against the live site with guardrails against loops and repetition.
 
 ## Getting Started
 
-**Requirements:** Python 3.11+
+**Requirements:** Python 3.11+ and [Google Chrome](https://www.google.com/chrome/)
 
 ```bash
 pip install automatiq
 ```
 
-Set your API key (AutomatiQ uses Gemini 3 Flash by default, but any [litellm-supported provider](https://docs.litellm.ai/docs/providers) works):
+Set your API key (AutomatiQ uses Gemini 3.5 Flash by default, but any [litellm-supported provider](https://docs.litellm.ai/docs/providers) works):
 
 ```bash
 # On Linux/macOS
@@ -59,33 +59,6 @@ automatiq run https://example.com
 ```
 
 That's it. Browse the site, press `Ctrl+C`, and the agent takes over.
-
-## Sponsor
-
-To run web automation and scraping scripts reliably, without hitting rate limits, IP bans, or CAPTCHA blocks due to high fraud scores.
-
-You need a high-quality Proxy Provider like [NodeMaven](https://go.nodemaven.com/automatiq)
-
-<p align="center">
-  <a href="https://go.nodemaven.com/automatiq">
-    <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="600">
-  </a>
-</p>
-
-[NodeMaven](https://go.nodemaven.com/automatiq) is the most reliable proxy provider, offering the highest quality IPs on the market. It is the ideal solution for automation, web scraping, SEO research, and social media management.
-
-**Why NodeMaven?**
-- **99.9% uptime**
-- **Sticky sessions** up to 7 days
-- **IP filtering:** all proxies have a fraud score <97%
-- **No KYC required**
-- **Cashback on traffic** - burn GB and earn up to 10% back
-
-🎁 **Special codes for our users, to your save money:**
-- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
-- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
-
-Maintaining this open-source project sustainably, is made possible thanks to our sponsor, **NodeMaven**.
 
 ## Usage Modes
 
@@ -122,7 +95,7 @@ automatiq run https://example.com \
   --base-url http://localhost:11434/v1
 ```
 
-*Note: For a permanent configuration so you don't have to pass flags every time, see the **Configuration** section below.*
+*For permanent configuration without CLI flags, see [Configuration](#configuration) below.*
 
 ## Reference
 
@@ -143,10 +116,11 @@ automatiq run https://example.com \
 | Flag | Description |
 |------|-------------|
 | `--target PATH` | Path to a specific session folder to run the agent on |
+| `--name NAME` | Custom name for the session folder (`record` and `run` only) |
 | `--model MODEL` | LiteLLM model string for the agent |
 | `--recorder-model MODEL` | Vision model for video-clip analysis |
 | `--base-url URL` | Custom OpenAI-compatible API endpoint |
-| `--max-steps N` | Maximum agent loop iterations (default: 60) |
+| `--max-steps N` | Maximum agent loop iterations (default: 100) |
 | `--sandbox-timeout SEC` | Seconds per IPython cell (default: 60) |
 | `--output-dir PATH` | Root directory for all output (default: ./output) |
 | `--no-banner` | Skip the startup animation |
@@ -160,12 +134,12 @@ On first run, AutomatiQ creates `~/.automatiq/config.toml` with commented defaul
 
 ```toml
 [models]
-agent    = "gemini/gemini-3-flash-preview"
-recorder = "gemini/gemini-3.1-flash-lite-preview"
+agent    = "gemini/gemini-3.5-flash"
+recorder = "gemini/gemini-3.1-flash-lite"
 # base_url = "http://localhost:11434/v1"   # Uncomment for Ollama / LM Studio / vLLM
 
 [agent]
-max_steps       = 60
+max_steps       = 100
 sandbox_timeout = 60
 
 [recording]
@@ -176,6 +150,31 @@ max_frames_per_prompt = 8
 ```
 
 *Priority order: **CLI flag** > `~/.automatiq/config.toml` > built-in defaults.*
+
+## Sponsor
+
+Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
+
+<p align="center">
+  <a href="https://go.nodemaven.com/automatiq">
+    <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="600">
+  </a>
+</p>
+
+[NodeMaven](https://go.nodemaven.com/automatiq) offers the highest quality IPs on the market — ideal for automation, web scraping, SEO research, and social media management.
+
+**Why NodeMaven?**
+- **99.9% uptime**
+- **Sticky sessions** up to 7 days
+- **IP filtering:** all proxies have a fraud score <97%
+- **No KYC required**
+- **Cashback on traffic** - burn GB and earn up to 10% back
+
+🎁 **Special codes for AutomatiQ users:**
+- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
+- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
+
+Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
 
 ## Development
 
@@ -192,7 +191,7 @@ uv run automatiq run https://example.com
 ```
 
 ### Dev Setup
-Development dependencies (pytest, ruff, pre-commit, etc.) are installed automatically via `uv sync`. To set up the git hooks:
+Development dependencies (pytest, ruff, pre-commit, etc.) are installed automatically via `uv sync`. This ensures `ruff`, `build`, `twine`, `pytest`, and `pre-commit` hooks (lint + format on every commit) are properly configured in your isolated environment. To set up the git hooks:
 
 ```bash
 uv run pre-commit install
@@ -202,7 +201,6 @@ Run tests:
 ```bash
 uv run pytest
 ```
-This ensures `ruff`, `build`, `twine`, `pytest`, and `pre-commit` hooks (lint + format on every commit) are properly configured in your isolated environment.
 
 ## License
 

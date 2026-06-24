@@ -203,11 +203,11 @@ dependencies = [
     { name = "numpy" },
     { name = "prompt-toolkit" },
     { name = "pydantic" },
-    { name = "pydantic-pick" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "rich" },
+    { name = "websockets" },
     { name = "zendriver" },
 ]
 
@@ -234,11 +234,11 @@ requires-dist = [
     { name = "numpy", specifier = "~=2.4.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.36" },
     { name = "pydantic", specifier = "~=2.12.5" },
-    { name = "pydantic-pick", specifier = "~=0.2.0" },
     { name = "python-dotenv", specifier = "~=1.2.1" },
     { name = "pyyaml", specifier = "~=6.0.3" },
     { name = "requests", specifier = "~=2.32.5" },
     { name = "rich", specifier = ">=13.0.0" },
+    { name = "websockets", specifier = ">=13.0" },
     { name = "zendriver", specifier = "~=0.15.2" },
 ]
 
@@ -1978,18 +1978,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1f/f2/f11dd73284122713f5f89fc940f370d035fa8e1e078d446b3313955157fe/pydantic_core-2.41.5-pp311-pypy311_pp73-musllinux_1_1_armv7l.whl", hash = "sha256:a668ce24de96165bb239160b3d854943128f4334822900534f2fe947930e5770", size = 2330317 },
     { url = "https://files.pythonhosted.org/packages/88/9d/b06ca6acfe4abb296110fb1273a4d848a0bfb2ff65f3ee92127b3244e16b/pydantic_core-2.41.5-pp311-pypy311_pp73-musllinux_1_1_x86_64.whl", hash = "sha256:f14f8f046c14563f8eb3f45f499cc658ab8d10072961e07225e507adb700e93f", size = 2316992 },
     { url = "https://files.pythonhosted.org/packages/36/c7/cfc8e811f061c841d7990b0201912c3556bfeb99cdcb7ed24adc8d6f8704/pydantic_core-2.41.5-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:56121965f7a4dc965bff783d70b907ddf3d57f6eba29b6d2e5dabfaf07799c51", size = 2145302 },
-]
-
-[[package]]
-name = "pydantic-pick"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/50/52/47c2b5be5403b9c27842cb90b4ce0ae7d71f8199792eeb4e94c2e43b49df/pydantic_pick-0.2.0.tar.gz", hash = "sha256:3757a266dacad4dd5f8bb0a9cd15f65a9166742319955f1828b68b7f98175bba", size = 33245 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/65/3d/8f5f4c1071d10def745e6f8961c2dece963580ddf7435efcd6c476ffb225/pydantic_pick-0.2.0-py3-none-any.whl", hash = "sha256:e6050c4bdd816f2f84f6210da1a70fca73eff3250f54e24997a5deef677834ef", size = 10484 },
 ]
 
 [[package]]
