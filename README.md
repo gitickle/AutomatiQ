@@ -34,6 +34,31 @@ AutomatiQ watches you browse, then an AI agent reverse-engineers your session in
 2. **Compile (Vision Analysis)** ⟶ The recording is split into per-action video clips. A vision LLM watches each clip and produces structured annotations (what was clicked, what changed, whether the action succeeded). Network requests are decoded, deduplicated, and structured into a workspace dump.
 3. **Agent (Sandbox Execution)** ⟶ An LLM investigator reads the workspace dump, experiments in an isolated Python/IPython environment, and iteratively produces a working script. It can test hypotheses against the live site with guardrails against loops and repetition.
 
+## Sponsor
+
+Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
+
+<p align="center">
+  <a href="https://go.nodemaven.com/automatiq">
+    <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="600">
+  </a>
+</p>
+
+[NodeMaven](https://go.nodemaven.com/automatiq) offers the highest quality IPs on the market — ideal for automation, web scraping, SEO research, and social media management.
+
+**Why NodeMaven?**
+- **99.9% uptime**
+- **Sticky sessions** up to 7 days
+- **IP filtering:** all proxies have a fraud score <97%
+- **No KYC required**
+- **Cashback on traffic** - burn GB and earn up to 10% back
+
+🎁 **Special codes for AutomatiQ users:**
+- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
+- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
+
+Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
+
 ## Getting Started
 
 **Requirements:** Python 3.11+ and [Google Chrome](https://www.google.com/chrome/)
@@ -150,31 +175,6 @@ max_frames_per_prompt = 8
 ```
 
 *Priority order: **CLI flag** > `~/.automatiq/config.toml` > built-in defaults.*
-
-## Sponsor
-
-Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
-
-<p align="center">
-  <a href="https://go.nodemaven.com/automatiq">
-    <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="600">
-  </a>
-</p>
-
-[NodeMaven](https://go.nodemaven.com/automatiq) offers the highest quality IPs on the market — ideal for automation, web scraping, SEO research, and social media management.
-
-**Why NodeMaven?**
-- **99.9% uptime**
-- **Sticky sessions** up to 7 days
-- **IP filtering:** all proxies have a fraud score <97%
-- **No KYC required**
-- **Cashback on traffic** - burn GB and earn up to 10% back
-
-🎁 **Special codes for AutomatiQ users:**
-- `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
-- `AUTOMATIQ40` - **40% off** ISP (Static) Proxies
-
-Maintaining this open-source project sustainably is made possible thanks to our sponsor, **NodeMaven**.
 
 ## Development
 
