@@ -20,9 +20,9 @@
 # AutomatiQ
 
 > [!Note]
-> **Alpha** ⟶ Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand why AutomatiQ exists and where it's headed.
+> **Alpha** ⟶ Things will break and change. Read [VISION.md](https://github.com/StoneSteel27/AutomatiQ/blob/main/VISION.md) to understand what AutomatiQ is trying to achieve and where it's headed.
 
-AutomatiQ watches you browse, then an AI agent reverse-engineers your session into a standalone Python automation/extraction script; no manual inspection needed.
+AutomatiQ records HTTP requests, Websocket frames, and your interactions for reverse-engineering your **goal/intent** into a standalone Python automation/extraction script without needing any manual inspection and unnecessary paid dependencies, or heavy dependencies like a browser during runtime.
 
 ## How it works
 
@@ -36,22 +36,16 @@ AutomatiQ watches you browse, then an AI agent reverse-engineers your session in
 
 ## Sponsor
 
+<a href="https://go.nodemaven.com/automatiq">
+  <img align="right" src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="400">
+</a>
+
 Running web automation and scraping scripts reliably requires high-quality proxies to avoid rate limits, IP bans, and CAPTCHA blocks. [NodeMaven](https://go.nodemaven.com/automatiq) is our recommended provider.
 
-<p align="center">
-  <a href="https://go.nodemaven.com/automatiq">
-    <img src="https://raw.githubusercontent.com/StoneSteel27/AutomatiQ/main/assets/nodemaven_banner.png" alt="NodeMaven - High Quality Proxies" width="600">
-  </a>
-</p>
-
-[NodeMaven](https://go.nodemaven.com/automatiq) offers the highest quality IPs on the market — ideal for automation, web scraping, SEO research, and social media management.
-
 **Why NodeMaven?**
-- **99.9% uptime**
-- **Sticky sessions** up to 7 days
-- **IP filtering:** all proxies have a fraud score <97%
-- **No KYC required**
-- **Cashback on traffic** - burn GB and earn up to 10% back
+- You get **99.9% uptime** with sticky sessions lasting up to 7 days.
+- All proxies have a **fraud score under 97%** while requiring **No KYC** for registration.
+- You can earn up to **10% cashback** on the data you use.
 
 🎁 **Special codes for AutomatiQ users:**
 - `AUTOMATIQ35` - **35% off** Mobile and Residential Proxies
