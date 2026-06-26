@@ -217,7 +217,7 @@ def cmd_record(args):
     from .cli.console import ask_session_name, start_cli_listeners
     from .core.cancel_standard import CancelToken, StopRequestedException, StopToken
     from .core.recorder import run_recording
-    from .core.recorder.data_compressor import sanitize_filename
+    from .core.recorder.compile.serializers import sanitize_filename
 
     session_name = args.name if args.name is not None else ask_session_name()
 
@@ -318,7 +318,7 @@ def cmd_run(args):
     from .cli.orchestrator import run_agent_cli
     from .core.cancel_standard import CancelToken, StopRequestedException, StopToken
     from .core.recorder import run_recording
-    from .core.recorder.data_compressor import sanitize_filename
+    from .core.recorder.compile.serializers import sanitize_filename
 
     session_name = args.name if args.name is not None else ask_session_name()
 

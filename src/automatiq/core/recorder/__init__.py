@@ -13,7 +13,7 @@ from .. import config, events
 from ..cancel_standard import CancelToken, StopToken
 from .blocklist_db import BlocklistDB
 from .browser_agent import BrowserAgent
-from .data_compressor import compile_workspace
+from .compile.workspace import compile_workspace
 from .video_recorder import ActionVideoRecorder
 
 logger = logging.getLogger(__name__)
