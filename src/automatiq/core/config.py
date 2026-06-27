@@ -44,6 +44,18 @@ RECORDER_AI_MODEL = "gemini/gemini-3.1-flash-lite"
 # Use with --model openai/<model-name> (the openai/ prefix is required by litellm).
 API_BASE = None
 
+# ── Proxy ────────────────────────────────────────────────────────────────────
+# Route the recording browser through an HTTP/SOCKS proxy.
+#   PROXY_SERVER   — static proxy URL, e.g. "http://user:pass@host:3128"
+#                    or "socks5://host:1080".
+#   PROXY_PROVIDER — optional "module:callable" that returns a proxy URL at
+#                    launch time (for rotating/dynamic proxies). When set it
+#                    takes precedence over PROXY_SERVER.
+# Proxying is only applied when PROXY_ENABLED is true.
+PROXY_ENABLED = False
+PROXY_SERVER = None
+PROXY_PROVIDER = None
+
 # ── Recording tunables ───────────────────────────────────────────────────────
 FPS = 3
 SEGMENT_PAD_SECONDS = 2
@@ -120,6 +132,30 @@ speed   = 1.0
 # Root directory for per-project output (workspace, blocklist).
 # Relative paths are resolved from the directory where you run `automatiq`.
 # dir = "output"
+
+[proxy]
+# Route the recording browser through an HTTP/SOCKS proxy.
+enabled  = false
+
+# Static proxy URL. Examples:
+#   server = "http://127.0.0.1:3128"
+#   server = "http://user:pass@host:3128"
+#   server = "socks5://127.0.0.1:1080"
+# server = ""
+
+# Optional dynamic provider "module:callable" returning a proxy URL at launch
+# (for rotating proxies). Takes precedence over `server` when set.
+#
+# The callable takes no required arguments and returns a proxy URL string,
+# e.g. "http://host:3128". A minimal rotating provider looks like:
+#
+#     # myproxies.py
+#     import requests
+#     def rotate() -> str:
+#         requests.get("http://127.0.0.1:8000/rotate", timeout=30)
+#         return "http://127.0.0.1:3128"
+#
+# provider = "myproxies:rotate"
 """
 
 
@@ -133,6 +169,7 @@ def _load_config_toml():
     Silently skips if the file is missing or unparseable.
     """
     global AGENT_MODEL, RECORDER_AI_MODEL, API_BASE
+    global PROXY_ENABLED, PROXY_SERVER, PROXY_PROVIDER
     global MAX_AGENT_STEPS, SANDBOX_TIMEOUT_SECONDS
     global FPS, SEGMENT_PAD_SECONDS, MERGE_GAP_THRESHOLD_SECONDS, MAX_FRAMES_PER_PROMPT
     global BANNER_ENABLED, BANNER_SPEED
@@ -160,6 +197,15 @@ def _load_config_toml():
         RECORDER_AI_MODEL = str(models["recorder"])
     if "base_url" in models:
         API_BASE = str(models["base_url"])
+
+    # [proxy]
+    proxy = data.get("proxy", {})
+    if "enabled" in proxy:
+        PROXY_ENABLED = bool(proxy["enabled"])
+    if "server" in proxy:
+        PROXY_SERVER = str(proxy["server"]) or None
+    if "provider" in proxy:
+        PROXY_PROVIDER = str(proxy["provider"]) or None
 
     # [agent]
     agent = data.get("agent", {})
