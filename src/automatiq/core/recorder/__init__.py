@@ -4,6 +4,7 @@ Usage: from automatiq.core.recorder import run_recording; run_recording("https:/
 """
 
 import asyncio
+import importlib
 import logging
 import os
 import tempfile
@@ -40,12 +41,48 @@ def _init_blocklist() -> BlocklistDB:
     return db
 
 
+def _resolve_proxy(override: str | None = None) -> str | None:
+    """Resolve the browser proxy URL.
+
+    Precedence: explicit override > dynamic provider > static server.
+    Returns None when proxying is disabled or resolution fails (recording then
+    proceeds on a direct connection).
+    """
+    if override:
+        return override
+
+    if not config.PROXY_ENABLED:
+        return None
+
+    if config.PROXY_PROVIDER:
+        module_path, _, attr = config.PROXY_PROVIDER.partition(":")
+        if not module_path or not attr:
+            events.log_warn.send(
+                "recorder",
+                text=f"Invalid proxy provider '{config.PROXY_PROVIDER}' (expected 'module:callable')",
+            )
+            return config.PROXY_SERVER
+        try:
+            module = importlib.import_module(module_path)
+            proxy_url = getattr(module, attr)()
+            if proxy_url:
+                return proxy_url
+            events.log_warn.send("recorder", text=f"Proxy provider {config.PROXY_PROVIDER} returned no URL")
+        except Exception as exc:
+            events.log_error.send("recorder", text=f"Proxy provider {config.PROXY_PROVIDER} failed: {exc}")
+            events.log_traceback.send("recorder")
+        return config.PROXY_SERVER
+
+    return config.PROXY_SERVER
+
+
 def run_recording(
     url: str = "about:blank",
     session_name: str | None = None,
     cancel_token: CancelToken = None,
     stop_token: StopToken = None,
     skip_callback=None,
+    proxy: str | None = None,
 ) -> bool:
     """Run the full recording pipeline: browser -> video -> compile workspace.
 
@@ -60,14 +97,16 @@ def run_recording(
     temp_video_path = os.path.join(tempfile.gettempdir(), "automatiq_full_record.mp4")
 
     blocklist = _init_blocklist()
+    proxy = _resolve_proxy(proxy)
 
     _video_recorder = ActionVideoRecorder(fps=config.FPS, output_path=temp_video_path)
-    _browser_agent = BrowserAgent(blocklist=blocklist)
+    _browser_agent = BrowserAgent(blocklist=blocklist, proxy=proxy)
 
     events.log_info.send("recorder", text="[RULE] STARTING RECORDER")
     events.log_info.send("recorder", text=f"Target URL : {url}")
     events.log_info.send("recorder", text=f"AI Model   : {config.RECORDER_AI_MODEL}")
     events.log_info.send("recorder", text=f"Blocklist  : {blocklist.total_enabled_domains()} domains loaded")
+    events.log_info.send("recorder", text=f"Proxy      : {proxy if proxy else 'direct (no proxy)'}")
 
     temp_data_dir = None
     success = False

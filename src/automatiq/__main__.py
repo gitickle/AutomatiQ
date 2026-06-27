@@ -198,6 +198,13 @@ def _apply_config_overrides(args):
         config.SANDBOX_TIMEOUT_SECONDS = args.sandbox_timeout
     if getattr(args, "base_url", None):
         config.API_BASE = args.base_url
+    if getattr(args, "proxy", None):
+        # An explicit --proxy is a static server and overrides any configured provider.
+        config.PROXY_ENABLED = True
+        config.PROXY_SERVER = args.proxy
+        config.PROXY_PROVIDER = None
+    if getattr(args, "no_proxy", False):
+        config.PROXY_ENABLED = False
     if getattr(args, "no_banner", False):
         config.BANNER_ENABLED = False
     if getattr(args, "verbose", False):
@@ -576,10 +583,20 @@ def main():
         p.add_argument("-h", "--help", action="store_true", default=False, dest="help_flag")
         p.add_argument("-V", "--version", action="store_true", default=False)
 
+    def _add_proxy_flags(p):
+        p.add_argument(
+            "--proxy",
+            metavar="URL",
+            default=None,
+            help="Route the browser through a proxy, e.g. http://host:3128 or socks5://host:1080",
+        )
+        p.add_argument("--no-proxy", action="store_true", default=False, help="Force a direct connection")
+
     p_record = subparsers.add_parser("record", add_help=False)
     p_record.add_argument("url", nargs="?", default="about:blank")
     p_record.add_argument("--name", type=str, default=None, help="Name of the session folder")
     _add_common_flags(p_record, include_recorder_model=True)
+    _add_proxy_flags(p_record)
     p_record.set_defaults(func=cmd_record)
 
     p_agent = subparsers.add_parser("agent", add_help=False)
@@ -591,6 +608,7 @@ def main():
     p_run.add_argument("url", nargs="?", default="about:blank")
     p_run.add_argument("--name", type=str, default=None, help="Name of the session folder")
     _add_common_flags(p_run, include_recorder_model=True)
+    _add_proxy_flags(p_run)
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()
