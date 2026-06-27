@@ -41,39 +41,42 @@ def _init_blocklist() -> BlocklistDB:
     return db
 
 
-def _resolve_proxy(override: str | None = None) -> str | None:
+def _resolve_proxy(proxy: str | None = None, no_proxy: bool = False) -> str | None:
     """Resolve the browser proxy URL.
 
-    Precedence: explicit override > dynamic provider > static server.
+    Precedence: explicit --no-proxy > explicit --proxy > dynamic provider > static server.
     Returns None when proxying is disabled or resolution fails (recording then
     proceeds on a direct connection).
     """
-    if override:
-        return override
-
-    if not config.PROXY_ENABLED:
+    if no_proxy:
         return None
 
-    if config.PROXY_PROVIDER:
-        module_path, _, attr = config.PROXY_PROVIDER.partition(":")
+    if proxy:
+        return proxy
+
+    if not config.RECORDER_PROXY_ENABLED:
+        return None
+
+    if config.RECORDER_PROXY_PROVIDER:
+        module_path, _, attr = config.RECORDER_PROXY_PROVIDER.partition(":")
         if not module_path or not attr:
             events.log_warn.send(
                 "recorder",
-                text=f"Invalid proxy provider '{config.PROXY_PROVIDER}' (expected 'module:callable')",
+                text=f"Invalid proxy provider '{config.RECORDER_PROXY_PROVIDER}' (expected 'module:callable')",
             )
-            return config.PROXY_SERVER
+            return config.RECORDER_PROXY_SERVER
         try:
             module = importlib.import_module(module_path)
             proxy_url = getattr(module, attr)()
             if proxy_url:
                 return proxy_url
-            events.log_warn.send("recorder", text=f"Proxy provider {config.PROXY_PROVIDER} returned no URL")
+            events.log_warn.send("recorder", text=f"Proxy provider {config.RECORDER_PROXY_PROVIDER} returned no URL")
         except Exception as exc:
-            events.log_error.send("recorder", text=f"Proxy provider {config.PROXY_PROVIDER} failed: {exc}")
+            events.log_error.send("recorder", text=f"Proxy provider {config.RECORDER_PROXY_PROVIDER} failed: {exc}")
             events.log_traceback.send("recorder")
-        return config.PROXY_SERVER
+        return config.RECORDER_PROXY_SERVER
 
-    return config.PROXY_SERVER
+    return config.RECORDER_PROXY_SERVER
 
 
 def run_recording(
@@ -83,6 +86,7 @@ def run_recording(
     stop_token: StopToken = None,
     skip_callback=None,
     proxy: str | None = None,
+    no_proxy: bool = False,
 ) -> bool:
     """Run the full recording pipeline: browser -> video -> compile workspace.
 
@@ -97,7 +101,7 @@ def run_recording(
     temp_video_path = os.path.join(tempfile.gettempdir(), "automatiq_full_record.mp4")
 
     blocklist = _init_blocklist()
-    proxy = _resolve_proxy(proxy)
+    proxy = _resolve_proxy(proxy=proxy, no_proxy=no_proxy)
 
     _video_recorder = ActionVideoRecorder(fps=config.FPS, output_path=temp_video_path)
     _browser_agent = BrowserAgent(blocklist=blocklist, proxy=proxy)

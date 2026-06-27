@@ -198,13 +198,6 @@ def _apply_config_overrides(args):
         config.SANDBOX_TIMEOUT_SECONDS = args.sandbox_timeout
     if getattr(args, "base_url", None):
         config.API_BASE = args.base_url
-    if getattr(args, "proxy", None):
-        # An explicit --proxy is a static server and overrides any configured provider.
-        config.PROXY_ENABLED = True
-        config.PROXY_SERVER = args.proxy
-        config.PROXY_PROVIDER = None
-    if getattr(args, "no_proxy", False):
-        config.PROXY_ENABLED = False
     if getattr(args, "no_banner", False):
         config.BANNER_ENABLED = False
     if getattr(args, "verbose", False):
@@ -260,6 +253,8 @@ def cmd_record(args):
             cancel_token=cancel_token,
             stop_token=stop_token,
             skip_callback=get_cli_skip_callback(),
+            proxy=getattr(args, "proxy", None),
+            no_proxy=getattr(args, "no_proxy", False),
         )
     except KeyboardInterrupt:
         from .cli.console import warn
@@ -361,6 +356,8 @@ def cmd_run(args):
             cancel_token=cancel_token,
             stop_token=stop_token,
             skip_callback=get_cli_skip_callback(),
+            proxy=getattr(args, "proxy", None),
+            no_proxy=getattr(args, "no_proxy", False),
         )
     except KeyboardInterrupt:
         from .cli.console import warn

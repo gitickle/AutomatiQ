@@ -42,6 +42,3 @@ test_cancel*.py
 test_interrupt*.py
 test_remote*.py
 Knowledge.md
-
-# Local, machine-specific proxy rotation provider (kept out of the generic proxy PR)
-src/automatiq/core/recorder/proxy9.py
